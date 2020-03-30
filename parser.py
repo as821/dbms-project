@@ -11,9 +11,43 @@ import re
 
 
 
-# constants
+# constants/global variables
+TABLES = {}     # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
 
 
+# standardized error function  --> should be in main driver program ... here temporarily
+def error(str=" parsing error. Invalid syntax or input."):
+    print("\nERROR:", str)
+    # raise ValueError          TODO uncomment this once done with testing
+
+
+
+
+
+
+
+
+# Class declaration/definitions
+# Table class   (not specific to parser.  Should be in main driver file)
+class Table:
+    def __init__(self):
+        self.name = ""
+        self.num_attributes = 0
+        self.num_tuples = 0
+        self.attribute_names = set()    # list of strings (for fast look up on table/attr validation)
+        self.attributes = []            # list of Attribute objects for this Table
+# END Table class
+
+
+
+
+# Attribute class   (not specific to parser.  Should be in main driver file)
+class Attribute:
+    def __init__(self):
+        self.name = ""
+        self.table = object()   # reference to the table that this attribute is a part of
+        self.type = ""          # string containing the type of this attribute
+# END Attribute class
 
 
 
@@ -25,21 +59,22 @@ class Query:
         self.select_attr = []       # give as tuple of (table name, attr name) --> only one table in from then table name can be ""
         self.from_tables = {}       # use alias/table name as key --> maps to table name (simplifies parsing)
         self.where = []             # TODO just a placeholder.  This will have to be some tree structure of comparisons
-
+        self.num_tables = 0
 
         ### add new flags/variables as needed here.  These flags will be interpreted by the backend ###
         # handle compound (? unsure proper term) queries here
-        union = False
-        intersect = False
-        difference = False
-        left_query = object()   # Query reference
-        right_query = object()  # Query reference
+        self.union = False
+        self.intersect = False
+        self.difference = False
+        self.left_query = object()   # Query reference
+        self.right_query = object()  # Query reference
 
         # aggregate operators.  For each supported operator maintain a list of indices (of select attr list) to apply that operator to
-        max = []
-        min = []
-        sum = []
+        self.max = []
+        self.min = []
+        self.sum = []
 # END Query class
+
 
 
 
@@ -79,12 +114,11 @@ class DML:
         # insert
         self.values = []
 
-
         # update
-        self.set = []   # empty list of Compaison objects.  Set assignment = True
+        self.set = []   # empty list of Comparison objects.  Set assignment = True
 
         # update and delete
-        self.where = []     # empty list of Comparison objects
+        self.where = object()   # placeholder until filled with a Comparison object by parser
 # END DML class
 
 
@@ -107,17 +141,15 @@ class DDL:
 #           #
 #   TODO    #
 #           #
-#   make contents of "if query" into a recursive function that accepts a query object and a line of input (allow for compound queries)
-#   make WHERE clause parsing into own function.  Can be used for queries and for DML (UPDATE + DELETE parsing)
+#   determine how to store indices --> need to validate index name input for certain DDL commands
+#   parse keys for create table
 #   handle joins (see if statement w/ pass)
-#   decide how to store tables/columns and add valiudation checks (see "TODO validation")
-#   add errors to aggregate operators (if an unknown if found, produce error)
-#   add support for errors (see TODOs)
-#   parse_where needs to support attributes without table specified.  Distinguish from attrs and scalar values
+#   test validation checks
+#   test DML insert, update, delete parsing
+#   test DDL create/drop table/index
+#   test where clause parsing with more complex comparisons
 
-
-#   determine how to return Query tree (or just have each type return individually??)
-#   support tables with same names and different column sets or just tables with different names
+#   update validation to support relations with the same name, but different set of columns?  --> probably not
 #   support NULLs? --> have to add another value to the tuples in DDL.attr (boolean for NULL/NOT NULL)
 #   add support for GROUPBY/HAVING clauses in "query" section
 #   include IN/BETWEEN too?
@@ -129,7 +161,7 @@ class DDL:
 def parser_main():  # parameter
     # s: list of tables/columns, string of input
     # take a string as input (contains entire query)
-    inp_line = "SELECT * FROM table_name WHERE emp# = 10"
+    inp_line = "INSERT INTO table_name (emp#, field2, field3) VALUES (a, b, c, d)" # "SELECT * FROM table_name WHERE (emp# = 10) and (a = b)"
     inp_line = inp_line.lower()
 
 
@@ -137,273 +169,284 @@ def parser_main():  # parameter
     query = False
     dml = False
     ddl = False
-    if "select" in inp_line:
+    if "select " in inp_line:
         query = True
-    elif "insert" in inp_line or "update" in inp_line or "delete" in inp_line:
+    elif "insert " in inp_line or "update " in inp_line or "delete " in inp_line:
         dml = True
-    elif "create" in inp_line or "drop" in inp_line:
+    elif "create " in inp_line or "drop " in inp_line:
         ddl = True
 
 
 
     # perform query-specific operations
     if query:
-        # produce Query object
-        this_query = Query()
+        # parse query and return result
+        return parse_query(Query(), inp_line)
 
-
-        #                            #
-        #   TODO make recursive here #
-        #                            #
-
-
-        # tokenize input on UNION, INTERSECT, DIFFERENCE (break into different query objects and parse them)
-        union = False
-        intersect = False
-        difference = False
-
-
-        # calls parser recursively, so only need to handle the "one" or "none" cases
-        if "union" in inp_line:
-            this_query.union = True
-            this_query.left_query = Query()
-            this_query.right_query = Query()
-            list = re.split("union", inp_line)
-            # TODO call query parser on both left and right queries
-
-        elif "intersect" in inp_line:
-            this_query.intersect = True
-            this_query.left_query = Query()
-            this_query.right_query = Query()
-            list = re.split("intersect", inp_line)
-
-            # TODO call query parser on both left and right queries
-
-        elif "difference" in inp_line:
-            this_query.difference = True
-            this_query.left_query = Query()
-            this_query.right_query = Query()
-            list = re.split("difference", inp_line)
-
-            # TODO call query parser on both left and right queries
-        else:
-            # break query into SELECT, FROM, and WHERE clauses (can add GROUPBY/HAVING here too) --> parse FROM first to define all aliases
-            select_start = inp_line.find("select") + len("select")
-            select_end = inp_line.find("from")
-            from_end = inp_line.find("where")
-            select_clause = inp_line[select_start : select_end]
-            from_clause = inp_line[(select_end + len("from")) : from_end]
-            where_clause = inp_line[(from_end + len("where")):]
-
-
-            ### parse FROM ###
-            # tokenize on JOIN (classify as NATURAL JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN, or INNER JOIN) --> validate contents of ON clause for join too
-            if "join" in from_clause:
-                # TODO determine which join.  Check table name/column combination for ON part of join command
-                pass
-
-
-            # tokenize on ',' to separate other table names from contents of JOINs (and from each other)
-            from_list = from_clause.split(',')
-            for name in from_list:
-                # check each table name for "as" --> recognize aliases and add to from_tables
-                alias_list = re.split(" as ", inp_line)
-                if len(alias_list) > 1:
-                    # strip whitespace off alias and name
-                    alias_list[0] = alias_list[0].rstrip()
-                    alias_list[0] = alias_list[0].lstrip()
-                    alias_list[1] = alias_list[1].rstrip()
-                    alias_list[1] = alias_list[1].lstrip()
-
-                    # TODO validate here (alias_list[0])
-
-                    # handle alias (put into from_tables)
-                    this_query.from_tables[alias_list[1]] = alias_list[0]   # input both alias and name to dictionary (can access that table either way)
-                    this_query.from_tables[alias_list[0]] = alias_list[0]
-                else:
-                    # no alias found, just insert to query from_table
-                    # strip whitespace from ends
-                    name = name.rstrip()
-                    name = name.lstrip()
-
-                    # TODO validate here (name)
-
-                    # add name to from_tables
-                    this_query.from_tables[name] = name
-
-
-
-            ### parse SELECT ###
-            # tokenize contents of SELECT on ',' --> break up attributes
-            select_list = select_clause.split(",")
-
-            for attr in range(len(select_list)):
-                agg_list = select_list[attr].split("(")    # opening parenthesis is beginning of aggregate operator
-                if len(agg_list) > 1:
-
-                    close_paren_list = agg_list[1].split(')')
-                    if len(close_paren_list) != 2:
-                        # TODO error (no closing parenthesis on operator)
-                        pass
-                    else:
-                        # identify any aggregate operators on select attributes
-                        if "min" in select_list[attr]:
-                            this_query.min.append(attr)
-                        elif "max" in select_list[attr]:
-                            this_query.max.appen(attr)
-                        elif "sum" in select_list[attr]:
-                            this_query.sum.append(attr)
-
-                    attr_name = close_paren_list[0].rstrip().lstrip()   # attr is between ( and ) and drop whitespace
-                else:
-                    attr_name = attr.lstrip().rstrip()  # no aggregate operator, so just strip whitespace
-
-
-
-                # search for table name of attr
-                attr_list = attr_name.split(".")    # split to find if alias used
-                if len(attr_list) > 1:
-                    # table specified
-                    attr_tup = (attr_list[0], attr_list[1])
-                elif len(this_query.from_tables) > 1:   # no table specified ( >1 table in query )
-                        # TODO error (ambiguous which table the attr is from)
-                        pass
-                else:
-                    # only on table in from, dont need to specify table
-                    table_key = this_query.from_tables.keys()[0]    # only one table --> possibly 2 entries if alias used
-                    attr_tup = (this_query.from_tables[table_key], attr_name)
-
-
-                # TODO validate that attr_list[1] is in attr_list[0]  (that desired attr is in table)
-                this_query.select_attr.append(attr_tup)
-
-
-
-
-            ### parse WHERE ###
-            parse_where(this_query, where_clause)
-
-            ### TODO parse additional clauses here (after have basics working) ###
-
-
-
-
-            # return a Query object
-        pass
     elif dml:
         # create DML object
         dml_obj = DML()
 
         # classify what type of DML
-        if insert:
+        if "insert " in inp_line:
+            dml_obj.insert = True
             # break into table name (and potentially columns) and list of values  --> use INTO and VALUES as delimiters
+            l = re.split(" values ", inp_line)
+            if len(l) != 2:
+                error(" invalid insert syntax.")
+            li = re.split(" into ", l[0])
+            if len(li) != 2:
+                error(" invalid insert syntax")
+            table_name_attr = li[0].split("(")
+            value_list = l[1].split("(")
+
+
+            # validate table (and check all columns too)
+            if len(table_name_attr) != 2:
+                error(" invalid insert syntax")
+            else:
+                table_name = table_name_attr[0].rstrip().lstrip()
+                table_columns = table_name_attr[1].split(",")
+
+                for i in range(len(table_columns)):     # clean whitespace and closing )
+                    table_columns[i] = table_columns[i].lstrip().rstrip().strip(")")
+
+                if table_name in TABLES:
+                    column_set = set(table_columns)
+                    if len(TABLES[table_name].attribute_name.difference(column_set)) != 0 or \
+                            len(column_set.difference(TABLES[table_name].attribute_name)) != 0:     # if difference is non-empty, sets are not identical
+                        error(" table names match, but attribute sets do not.")
+                else:
+                    error(" invalid table name in insert.")
+
+
+            # syntax checking/casting for specified values
+            if len(value_list) != 2:
+                error(" invalid syntax.  Missing (")
+            else:
+                val_list = value_list[1].split(")")
+                if len(val_list) != 2:
+                    error(" invalid syntax.  Missing )")
+                else:
+                    temp = val_list.split(",")
+                    for i in temp:
+                        helper = i.rstrip().lstrip()
+                        if helper.isdigit():
+                            if len(helper.split(".")) != 1:
+                                dml_obj.append(float(helper))
+                            else:
+                                dml_obj.append(int(helper))
+                        else:
+                            dml_obj.values.append(helper)  # drop whitespace and insert into list
 
 
 
-
-            # validate table name (if columns are provided, check them against columns for a table with the
-            #   specified name --> can distinguish tables with the same name.  If columns don't match any, output error)
-
-
-
-
-
-            # tokenize list of values on "," and load into dml_obj.values list
-
-
-
-
-            pass
-        elif update:
+        elif "update " in inp_line:
+            dml_obj.update = True
             # break into table name, set values, and where condition
+            l = re.split(" set ", inp_line)
+            if len(l) != 2:
+                error(" syntax error update.")
 
-
+            # determine table name
+            up = re.split("pdate ", l[0])   # exclude the letter u so can evaluate the len to 2 (tell if missing table name)
+            if len(up) != 2:
+                error(" missing table name in update command.")
+            table_name = up[1].lstrip().rstrip()
 
             # validate table name
+            if table_name not in TABLES:
+                error(" invalid table name used in update.")
 
 
+            # determine set values and parse where condition if it exists
+            se = re.split(" where ", l[1])
+            if len(se) == 2:    # where clause found
+                set_values = se[0].split(",")
+                dml_obj.where = parse_where(this_query, se[1])
+
+            elif len(se) == 1:  # no where clause included
+                set_values = se.split(",")
+
+            else:
+                error(" invalid update syntax")
 
 
-            # tokenize set values by "," --> produces a list of Comparison objects (use assignment option)
+            # produces a list of Comparison objects (use assignment option) to represent set statements
+            for s in set_values:
+                this_comp = Comparison()
+                this_comp.assignment = True
+
+                operands = s.split("=")
+                if len(operands) != 2:
+                    error(" invalid number of operands in set clause of update.")
+
+                # determine data types of operands and clear of whitespace
+                left = operands[0].lstrip().rstrip()
+                if left.isdigit():
+                    if len(left.split(".")) == 2:
+                        this_comp.left_operand = float(left)
+                    else:
+                        this_comp.left_operand = int(left)
+                else:
+                    this_comp.left_operand = left
+
+                right = operands[1].lstrip().rstrip()
+                if right.isdigit():
+                    if len(right.split(".")) == 2:
+                        this_comp.right_operand = float(right)
+                    else:
+                        this_comp.right_operand = int(right)
+                else:
+                    this_comp.right_operand = right
+
+                # add this comparison object to dml_obj
+                dml_obj.set.append(this_comp)
 
 
-
-
-
-
-            # call WHERE parser (get back a tree of Comparison objects
-
-
-
-
-            pass
         else:       # delete
-            # break into table name and WHERE condition
+            dml_obj.delete = True
+
+            # break into table name and WHERE condition (and parse where condition if it exists
+            del_list = re.split(" where ", inp_line)
+            if len(del_list) == 2:  # where clause found
+                dml_obj.where = parse_where(this_query, del_list[1])
+            elif len(del_list) != 1:
+                error(" too many WHERE clauses in delete")
+
+            # else --> no where clause found.  Can parse table name the same whether or not where clause was found
 
 
-
+            # get table name
+            t_name = re.split("elete from", del_list[0])    # remove d from delete so can tell if produces 1 or two items
+            if len(t_name) != 2:
+                error(" delete command syntax error.")
 
 
             # validate table name
+            table_name = t_name[1].lstrip().rstrip()
+            if table_name in TABLES:
+                dml_obj.table_name = table_name
+            else:
+                error(" invalid table name in delete")
 
-
-
-
-
-            # call WHERE parser (get back a tree of Comparison objects)
-
-
-
-
-
-            pass
         # return DML object
+        return dml_obj
     elif ddl:
         # breakdown and classify as CREATE or DROP / TABLE or INDEX'
-
-
-
+        ddl_obj = DDL()
 
         # treat each case appropriately
-        if create_table:
-            # get table name (validate --> no other tables with same name/columns combination
-            #   (I think.  Might want to only support tables with different names)
+        if "create " in inp_line and " table " in inp_line:
+            ddl_obj.create = True
+            ddl_obj.table = True
 
+            # break up input
+            create_list = inp_line.split("(")
+            if len(create_list) != 2:
+                error(" invalid create table syntax.")
 
+            # determine table name and verify no table exist with the same name
+            t_name = re.split("reate table ", create_list[0])   # exclude c in create to get 2 vs always 1 --> identify errors
+            if len(t_name) != 2:
+                error(" invalid create table syntax.  No table name supplied.")
 
+            table_name = t_name[1].lstrip().rstrip()
+            if table_name in TABLES:
+                error(" table name already in use.")
 
+            ddl_obj.table_name = table_name
 
             # get list of attributes (tokenize by ','.  Record as tuples of (name, datatype))
+            attr_list = create_list[1].split(",")
+            for attr in attr_list:  # for each attribute in list, split into name and data type
 
 
+                #
+                #   TODO parse keys and deal with closing )
+                #
+
+
+
+                if "primary key" in attr:
+                    pass
+                elif "foreign key" in attr:
+                    pass
+                else:
+                    l = attr.split(" ")
+                    if len(l) != 2:
+                        error(" missing data type")
+                    ddl_obj.attr.append((l[0].lstrip().rstrip(), l[1].lstrip().rstrip()))   # append tuple (attr, dtype)
+
+
+
+        elif "drop " in inp_line and " table " in inp_line:
+            ddl_obj.create = False
+            ddl_obj.table = True
+
+
+            # get table name (and validate it)
+            l = re.split(" table ", inp_line)
+            table_name = l[1].lstrip().rstrip()
+
+            # validate table name
+            if table_name not in TABLES:
+                error(" invalid table name.  Cannot delete table that does not exist")
+            else:
+                ddl_obj.table_name = table_name
 
             pass
-        elif drop_table:
-             # get table name (and validate it)
-
-
-            pass
-        elif create_index:
+        elif "create " in inp_line and " index " in inp_line:
+            ddl_obj.create = True
+            ddl_obj.table = False
             # break into index name/table information (using ON clause)
+            c_ind_list = re.split(" on ", inp_line)
+            if len(c_ind_list) != 2:
+                error(" invalid create index syntax.")
+
+            # get index name
+            ind = re.split(" index ", c_ind_list[0])
+            ind_name = ind[1].rstrip().lstrip()
+
+            # TODO validate index name (make sure does not exist)
+            ddl_obj.index_name = ind_name
 
 
+            # get table/attr name
+            t_name = c_ind_list[1].split("(")
+            if len(t_name) != 2:
+                error(" invalid syntax.  Must specify what attribute to create index on.")
+            table_name = t_name[0].rstrip().lstrip()    # clean whitespace
+            attr = t_name[1].split(')')                 # drop closing parenthesis from attribute name
+            attr_name = attr[0].rstrip().lstrip()       # clean whitespace
 
-            # get index name (and make validate --> no other indices with the same name)
+            # validate table name
+            if table_name not in TABLES:
+                error(" cannot create an index on a nonexistent table.")
+            elif attr_name not in TABLES[table_name].attribute_name:
+                error(" cannot create an index on an attribute that does not exist in the given table.")
 
+            # else, set valid table and attribute names
+            ddl_obj.table_name = table_name
+            ddl_obj.attr.append(attr_name)
 
-
-            # validate table name (and columns listed --> column to make index on).  Only accept a single attribute for index creation
-
-
-
-            pass
         else:       # drop index
             # validate index name
+            ddl_obj.create = False
+            ddl_obj.table = False
+
+            # get table name (and validate it)
+            l = re.split(" index ", inp_line)
+            ind_name = l[1].lstrip().rstrip()
+
+            # TODO validate index name
+            ddl_obj.index_name = ind_name
 
 
-            pass
+
+        return ddl_obj
     else:       # invalid input.  Throw error and take next line of input
-        pass
+        error(" unrecognized input type (not DML or DDL)")
 
 
 
@@ -415,36 +458,173 @@ def parser_main():  # parameter
 
 
 
+# parse_query
+def parse_query(this_query, inp_line):
+    # tokenize input on UNION, INTERSECT, DIFFERENCE (break into different query objects and parse them)
+    # calls parser recursively, so only need to handle the "one" or "none" cases
+    if "union" in inp_line:
+        this_query.union = True
+        l = re.split("union", inp_line)
+
+        # call query parser on both left and right queries
+        this_query.left_query = parse_query(Query(), l[0])
+        this_query.right_query = parse_query(Query(), l[1])
+
+    elif "intersect" in inp_line:
+        this_query.intersect = True
+        l = re.split("intersect", inp_line)
+
+        # call query parser on both left and right queries
+        this_query.left_query = parse_query(Query(), l[0])
+        this_query.right_query = parse_query(Query(), l[1])
+
+    elif "difference" in inp_line:
+        this_query.difference = True
+        l = re.split("difference", inp_line)
+
+        # call query parser on both left and right queries
+        this_query.left_query = parse_query(Query(), l[0])
+        this_query.right_query = parse_query(Query(), l[1])
+    else:
+        # break query into SELECT, FROM, and WHERE clauses (can add GROUPBY/HAVING here too) --> parse FROM first to define all aliases
+        select_start = inp_line.find("select") + len("select")
+        select_end = inp_line.find("from")
+        from_end = inp_line.find("where")
+        select_clause = inp_line[select_start: select_end]
+        from_clause = inp_line[(select_end + len("from")): from_end]
+        where_clause = inp_line[(from_end + len("where")):]
+
+        ### parse FROM ###
+        # tokenize on JOIN (classify as NATURAL JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN, or INNER JOIN) --> validate contents of ON clause for join too
+        if "join" in from_clause:
+
+            #
+            # TODO determine which join is used.  Check table name/column combination for ON part of join command
+            #
+
+
+            pass
+
+        # tokenize on ',' to separate other table names from contents of JOINs (and from each other)
+        from_list = from_clause.split(',')
+        for name in from_list:
+            # check each table name for "as" --> recognize aliases and add to from_tables
+            this_query.num_tables += 1
+            alias_list = re.split(" as ", name)
+            if len(alias_list) > 1:
+                # strip whitespace off alias and name
+                alias_list[0] = alias_list[0].rstrip()
+                alias_list[0] = alias_list[0].lstrip()
+                alias_list[1] = alias_list[1].rstrip()
+                alias_list[1] = alias_list[1].lstrip()
+
+                # validate table existence (alias_list[0])
+                if alias_list[0] in TABLES:
+                    # table exists.  put both alias and table name into from_tables (put into from_tables)
+                    this_query.from_tables[alias_list[1]] = alias_list[0]
+                    this_query.from_tables[alias_list[0]] = alias_list[0]
+                else:
+                    error("nonexistent table used in FROM clause")
+                    pass
+            else:
+                # no alias found, just insert to query from_table
+                # strip whitespace from ends
+                name = name.rstrip().lstrip()
+
+                # validate table name
+                if name in TABLES:
+                    this_query.from_tables[name] = name
+                else:
+                    error("nonexistent table used in FROM clause")
+                    pass
+
+
+        ### parse SELECT ###
+        # tokenize contents of SELECT on ',' --> break up attributes
+        select_list = select_clause.split(",")
+
+        for attr in range(len(select_list)):
+            agg_list = select_list[attr].split("(")  # opening parenthesis is beginning of aggregate operator
+            if len(agg_list) > 1:
+
+                close_paren_list = agg_list[1].split(')')
+                if len(close_paren_list) != 2:
+                    error(" invalid aggregate operator syntax")
+                    pass
+                else:
+                    # identify any aggregate operators on select attributes
+                    if " min(" in select_list[attr]:
+                        this_query.min.append(attr)
+                    elif " max(" in select_list[attr]:
+                        this_query.max.appen(attr)
+                    elif " sum(" in select_list[attr]:
+                        this_query.sum.append(attr)
+                    elif " count(" in select_list[attr] or " avg(" in select_list[attr]:    # any aggregate operators we are not going to support
+                        error(" invalid aggregate operator included in SELECT.")
+
+
+                attr_name = close_paren_list[0].rstrip().lstrip()  # attr is between ( and ) and drop whitespace
+            else:
+                attr_name = select_list[attr].lstrip().rstrip()  # no aggregate operator, so just strip whitespace
+
+            # search for table name of attr
+            attr_list = attr_name.split(".")  # split to find if alias used
+            if len(attr_list) > 1:
+                # table specified
+                attr_tup = (attr_list[0], attr_list[1])
+            elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                pass
+            else:
+                # only one table in from, dont need to specify table
+                table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+                attr_tup = (this_query.from_tables[table_key], attr_name)
+
+            # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
+            if attr_tup[0] in TABLES:
+                if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
+                    this_query.select_attr.append(attr_tup)
+                else:
+                    error(" valid table name.  Invalid attribute in SELECT clause")
+                    pass
+            else:
+                error(" invalid table used in SELECT clause")
+                pass
+
+        ### parse WHERE ###
+        this_query.where = parse_where(this_query, where_clause)
+
+        ### TODO parse additional clauses here (after have basics working) ###
+
+    # return a Query object
+    return this_query
+# END parse_query
+
+
+
+
+
 
 
 
 # parse_where
-def parse_where(this_query, where_clause):
-    # TODO  add support for attributes without a table name specified (ex. only one table used in query)
-    # TODO  support/remove parenthesis --> (does breaking of operands need to be recursive too?? Maybe base case should
-            # be no operators found...
-
-
-
-
-
-
+def parse_where(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
     # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
     this_comparison = Comparison()
     if "and" in where_clause:
-        and_list = re.split(" and ", inp_line)
+        and_list = re.split(" and ", where_clause)
         this_comparison.left_operand = parse_where(this_query, and_list[0])
         this_comparison.right_operand = parse_where(this_query, and_list[1])
 
     elif "or" in where_clause:
-        or_list = re.split(" or ", inp_line)
+        or_list = re.split(" or ", where_clause)
         this_comparison.left_operand = parse_where(this_query, or_list[0])
         this_comparison.right_operand = parse_where(this_query, or_list[1])
 
     else:   # base case
         # break into operands
-        if "==" in where_clause:
-            op = "=="
+        if "=" in where_clause:
+            op = "="
             this_comparison.equal = True
 
         elif "!=" in where_clause:
@@ -468,24 +648,53 @@ def parse_where(this_query, where_clause):
             this_comparison.less = True
 
         else:
-            # TODO error --> no recognized operation
+            error(" no recognized operation used in the WHERE clause")
             pass
 
         operand_list = re.split(op, where_clause)   # split clause on whichever operation is found first
-        this_comparison.left_operand = operand_list[0].rstrip().lstrip()
-        this_comparison.right_operand = operand_list[1].rstrip().lstrip()
+        for o in range(len(operand_list)):      # clean operands before processing
+            operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
+
 
         for operand in range(len(operand_list)):
-            # once at leaf level of comparisons, tokenize on "." to find table names
-            helper = object()
-            attr_list = attr_name.split(".")  # split to find if alias used
-            if len(attr_list) > 1:  # if a table name is specified
-                # TODO validate attr_tup here
-                helper = (attr_list[0], attr_list[1])
+            # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
 
-            else:   # no table name specified
-                # TODO support attributes with no table specified (only one table in query)
-                helper = operand_list[operand].rstrip().lstrip()
+            if operand_list[operand].isdigit():     # if this operand is a number
+                if '.' in operand_list[operand]:
+                    helper = float(operand_list[operand])
+                else:
+                    helper = int(operand_list[operand])
+            else:   # operand is a name of something (not a number)
+                attr_list = operand_list[operand].split(".")  # split to find if alias used  --> float issues?
+                if len(attr_list) > 1:  # if a table name is specified
+
+                    # validate attr_list here
+                    if attr_list[0] in TABLES:
+                        if attr_list[1] in TABLES[attr_list[0]].attribute_names:
+                            helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
+                        else:
+                            error(" valid table name, invalid attribute in WHERE clause")
+                            pass
+                    else:
+                        error(" invalid table name in WHERE clause")
+                        pass
+
+                elif this_query.num_tables ==  1:  # no table specified ( >1 table in query )
+                    # only one table is used in the query, so no table specification needed
+                    # only on table in from, dont need to specify table
+                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+
+                    # validate operand_list[operand] is in this_query.from_tables[table_key] table
+                    if operand_list[operand] in TABLES[this_query.from_tables[table_key]].attribute_names:
+                         helper = (this_query.from_tables[table_key], operand_list[operand])
+                    else:
+                        error(" valid table name, invalid attribute in WHERE clause")
+                        pass
+
+                else:
+                    error(" ambiguous which table attribute is from in the WHERE clause. >1 table in querey, must specify where the attribute comes from")
+                    pass
+
 
             # complete the Comparison object
             if operand == 0:
@@ -493,12 +702,13 @@ def parse_where(this_query, where_clause):
             else:
                 this_comparison.right_operand = helper
 
-        # TODO need to add support for aggregate operators.  Maybe do type checking.  if str --> attribute. If int --> for comparison ??
 
 
-
+        # TODO need to add support for aggregate operators and parenthesis
     return this_comparison
 # END parse_where
+
+
 
 
 
