@@ -43,6 +43,7 @@ import pickle
 
 # constants/global variables
 TABLES = {}     # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
+INDEX = {}      # map index name to table name.  Index stored in that table
 STORAGE_DIR = "/Users/andrewstange/Desktop/Spring_2020/COSC280/dbms_proj/backend/storage/"
 
 # Class declaration/definitions
@@ -63,8 +64,6 @@ class Table:
 class Attribute:
     def __init__(self):
         self.name = ""
-                                # TODO don't think this table attribute is needed
-        self.table = object()   # reference to the table that this attribute is a part of
         self.type = ""          # string containing the type of this attribute
 # END Attribute class
 
@@ -173,7 +172,9 @@ class Storage:
     def __init__(self):
         self.filename = ""
         self.num_tuples = 0
-        self.index = {}     # index is a hashmap of key --> location in file
+        self.index = {}     # index is a hashmap of key --> location in file.  Can be a list of locations in the file if index not on a key
+        self.index_attr = ""    # store name of attribute that the index is on
+        self.index_name = ""
         self.attr_loc = {}  # should map attribute name to index of attribute in a given tuple
 
 
@@ -186,12 +187,8 @@ class Storage:
 #   determine how access paths will work (on index, on primary key --> linear search, or on simple linear search for a match if no primary key specified)
 #   make a second low-level access function to be called when an indexed attribute (ex. primary key) is being searched on
 
-#   Determine what DS to use for general storage
-#   determine how remove function should work
-#   Complete low level functions
 #   Determine how indexes will work and implement
 
-#   low level update function is needed too
 #   would an attribute-specific storage be more effective than a tuple-specific storage considering the operations we perform --> tuple-specific is good for doing selections first while attribute-specific storage is good for doing projections first
 
 
@@ -220,7 +217,7 @@ def access(table_obj):
 
     # get index_list from file
     file = open(table_obj.storage.filename, "rb")
-    list_location = struct.unpack("L", file.read(8))[0]    # python long is 4 bytes.  Read first 4 bytes of file and unpack them
+    list_location = struct.unpack("L", file.read(8))[0]    # Read first bytes of file and unpack them
     file.seek(list_location, 0)   # seek list location
     index_list = pickle.load(file)
 
@@ -251,12 +248,10 @@ def access(table_obj):
 # write function
 #   (all write operations to DB through this function.  Need to find location(s) to write to and then make those edits
 #   (should be like an update function).  Must update any relevant indices too )
-def write(table_obj, obj_to_insert, overwrite=False):    # TODO determine what DS to use (list of lists?? for a relation)
+#   !!! TODO CALLING FUNCTION MUST MAKE SURE ATTRIBUTES ARE IN THE CORRECT ORDER !!!
+def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of lists?? for a relation)
     # if overwrite == True, clear entire relation and populate it with the contents of obj_to_insert
     # obj_to_insert should be a list of lists (a list of instances to insert into the table) --> even if just a list around a single list
-
-    # TODO check if index exists.  if so, have to determine where to insert the tuple, insert it there, and insert new tuple into index
-
 
     # check existence of Storage object
     if type(table_obj.storage) is object:
@@ -265,7 +260,7 @@ def write(table_obj, obj_to_insert, overwrite=False):    # TODO determine what D
         pass
 
     # get index_list from file
-    file = open(table_obj.storage.filename, "rb")
+    file = open(table_obj.storage.filename, "rb+")
     list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
     file.seek(list_location, 0)  # seek list location
     index_list = pickle.load(file)
@@ -300,14 +295,52 @@ def write(table_obj, obj_to_insert, overwrite=False):    # TODO determine what D
 #   pass in list of lists (list of instances) that contain the updates
 #   pass in a list of the same size that contains a list of indices to update
 def update(table_obj, update_list, index_list):
-    pass
-    
+    # check Storage object exists
+    if type(table_obj.storage) is object:
+        # TODO error    no underlying data structure existz
+        pass
+
+    if len(update_list) != len(index_list):
+        # TODO error    dev error.  Lists must be the same length
+        pass
+
+    # open file, get index list
+    file = open(table_obj.storage.filename, "rb+")
+    list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
+    file.seek(list_location, 0)  # seek list location
+    file_index_list = pickle.load(file)
+
+    # load relation from memory
+    relation = []
+    for ind in file_index_list:
+        file.seek(ind, 0)   # seek to specified index, with respect to the head of the file
+        relation.append(pickle.load(file))
+
+    # replace specified tuples with the corresponding one in update_list
+    count = 0
+    for up in index_list:
+        relation[up] = update_list[count]
+        count += 1
+
+    # clear current file contents (after space left for file_index_list file location)
+    file.seek(8, 0)
+    file.truncate()
+
+    # write updated relation to file
+    file_index_list = []
+    for r in relation:
+        file_index_list.append(file.tell())      # record tuple location in file
+        pickle.dump(r, file)              # append tuple to the file
+
+    # record new location of index list
+    list_loc = file.tell()
+    pickle.dump(index_list, file)
+    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
+    file.write(struct.pack("L", list_loc))
+
+    # close file
+    file.close()
 # END update
-
-
-
-
-
 
 
 
@@ -373,7 +406,7 @@ def remove(table_obj, key_to_remove):
 
 
     # write remaining relation back to file
-    file = open(table_obj.storage.filename, "rb")
+    file = open(table_obj.storage.filename, "rb+")
     file.seek(8, 0)         # leave space for the index_list header
     file.truncate()         # delete rest of file contents (overwrite it)
     index_list = []
@@ -400,7 +433,8 @@ def remove(table_obj, key_to_remove):
 
 # create relation function
 #   (for CREATE table command.  Produce the data structure for the given relation)
-def create_relation(table_obj, storage_dir):
+#   !!! TODO IN CREATE TABLE COMMAND MUST POPULATE ATTRIBUTE INFORMATION FOR OTHER FUNCTIONS TO WORK !!!
+def create_relation_storage(table_obj, storage_dir):
     table_obj.storage = Storage()
     table_obj.storage.filename = storage_dir + table_obj.name
     
@@ -420,7 +454,7 @@ def create_relation(table_obj, storage_dir):
 
 # delete relation function
 #   (for DROP table function. This function only deletes the underlying data structure)
-def delete_relation(table_obj):
+def delete_relation_storage(table_obj):
     # check if Storage object exists
     if type(table_obj.storage) is object:
         # TODO error
@@ -439,15 +473,70 @@ def delete_relation(table_obj):
 
 
 
-# create index function
-#   (create the underlying data structure for an index)
+# create index function (create the underlying data structure for an index) --> only call on tables with a Storage obj defined
+def create_index(table_obj, index_name, attr):  # index_name is user specified index name.  Attr is the attribute the index is on
+    if type(table_obj.storage) is object:
+        # TODO error    no underlying data structure declared for table
+        pass
+
+    # open file
+    file = open(table_obj.storage.filename, "rb+")
+    list_location = struct.unpack("L", file.read(8))[0]
+    file.seek(list_location, 0)  # seek list location
+    index_list = pickle.load(file)
+
+    # load relation from memory
+    relation = []
+    for ind in index_list:
+        file.seek(ind, 0)  # seek to specified index, with respect to the head of the file
+        relation.append(pickle.load(file))
+
+    # done with file I/O, close file
+    file.close()
+
+    # determine which index in the tuples is attr
+    if attr not in table_obj.storage.attr_loc:
+        # TODO error    tried to create an index on nonexistent attribute
+        pass
+
+    attr_location = table_obj.storage.attr_loc[attr]
+
+
+    # record file location for the tuple in index dictionary, using attr value as key (not making changes to tuples --> no need to write back)
+    for r in range(len(relation)):
+        # if this attribute value has not been found yet
+        if relation[r][attr_location] not in table_obj.storage.index:
+            table_obj.storage.index[relation[r][attr_location]] = []    # allows indexing on non-keys if necessary
+
+        # add file location to the index
+        table_obj.storage.index.append(index_list[r])
+
+
+    # add this index to INDEX
+    INDEX[index_name] = table_obj.name
+    table_obj.storage.index_name = index_name
+# END create_index
 
 
 
 
 
-# delete index function
-#   (delete an existing index)
+
+# delete index function (delete an existing index)
+def delete_index(table_obj, index_name):
+    if index_name not in INDEX:
+        # TODO error    trying to delete a non-existent index
+        pass
+
+    # remove key from INDEX
+    INDEX.pop(index_name)
+
+
+    # delete contents of index data structure
+    table_obj.storage.index = {}
+    table_obj.storage.index_attr = ""
+    table_obj.storage.index_name = ""
+# END delete_index
 
 
 
@@ -455,7 +544,241 @@ def delete_relation(table_obj):
 
 
 
-# update index (called when adding a tuple to a relation with an existing index)
+# access index
+def access_index(table_obj, index_val, index_name):
+    # check storage object exists
+    if type(table_obj.storage) is object:
+        # TODO error    no underlying DS
+        pass
+
+    # check index validity
+    if index_name not in INDEX:
+        # TODO error
+        pass
+    elif INDEX[index_name] != table_obj.name:
+        # TODO error
+        pass
+    elif index_val not in table_obj.storage.index:
+        # TODO error
+        pass
+
+    # open file
+    file = open(table_obj.storage.filename, "rb")
+
+    # load specific tuples
+    tup = []
+    for loc in table_obj.storage.index[index_val]:
+        file.seek(loc, 0)  # seek to specified index, with respect to the head of the file
+        tup.append(pickle.load(file))
+
+    # close file
+    file.close()
+
+    # return
+    return tup
+# END access_index
+
+
+
+
+
+
+
+
+
+# write index
+def write_index(table_obj, obj_to_insert):
+    # check existence of Storage object
+    if type(table_obj.storage) is object:
+        # TODO error    Storage object has not been created, so we cannot access it
+        print("ERROR")
+        pass
+
+    # check index validity
+    if table_obj.storage.index_attr == "":
+        # TODO error    no index attribute specified --> no index exists for this table
+        pass
+
+    # get the location in the tuple that the index key is stored at
+    index_key = table_obj.storage.attr_loc[table_obj.storage.index_attr]
+
+    # get index_list from file
+    file = open(table_obj.storage.filename, "rb+")
+    list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
+    file.seek(list_location, 0)  # seek list location
+    index_list = pickle.load(file)
+
+    # insert tuple at back of file (same address tuple_index used to be at)
+    file.seek(list_location, 0)  # seek list location
+    for obj in obj_to_insert:
+        # error checking in function input
+        if type(obj) is not list:
+            # TODO error    (developer error)
+            print("ERROR: dev error in backend.write")
+
+        # add tuple to file
+        loc = file.tell()
+        index_list.append(loc)  # record tuple location in file
+        pickle.dump(obj, file)  # append tuple to the file
+
+        # record tuple location in index
+        if obj[index_key] not in table_obj.storage.index:
+            table_obj.storage.index[obj[index_key]] = []    # if attr value not previously in index, make an empty list
+        table_obj.storage.index[obj[index_key]].append(loc) # store location in the file
+
+    # write index_list and its location back to the file
+    list_loc = file.tell()
+    pickle.dump(index_list, file)
+    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
+    file.write(struct.pack("L", list_loc))
+
+    # close file
+    file.close()
+# END write_index
+
+
+
+
+
+
+
+
+
+# remove_index  (remove function for tables with indices) --> does not use index to access table, only updates it on deletion
+def remove_index(table_obj, key_to_remove):
+    # check Storage obj exists
+    if type(table_obj.storage) is object:
+        # TODO error
+        pass
+
+    # check index validity
+    if table_obj.storage.index_attr == "":
+        # TODO error    no index to update
+        pass
+
+    # clear the current index, all going to be overwritten in writing back to the file
+    table_obj.storage.index = {}
+
+    # if list of indices, remove item at that index
+    relation = []
+    if type(key_to_remove[0]) is not int:  # keys are in index form (like index number in the file/list --> tuple #)
+        # sort from largest to smallest (delete from back first --> less copying of the list)
+        keys_to_remove.sort(reverse=True)
+
+        # access relation
+        relation = access(table_obj)
+
+        # delete specified tuples
+        for i in key_to_remove:
+            relation.pop(i)  # trust in calling function that index is valid
+
+    # if list of lists (match them on primary key (if exists) and remove.  if no primary key, then match entire lists to lists in file to remove proper one)
+    elif type(key_to_remove[0]) is list:
+        # access relation
+        relation = access(table_obj)
+
+        # loop through and match and delete specified tuples
+        relation_remove_list = []
+        for tup in range(len(relation)):
+            k_remove = val
+            for k in range(len(key_to_remove)):
+                if relation[tup] == key_to_remove[k]:  # multiple linear search for a match
+                    # match found, mark both to be removed
+                    k_remove = val
+                    relation_remove_list.append(rel)
+                    break  # outer loop tuple was found, move onto the next one
+
+            # remove tuple that is found from key_to_remove list
+            key_to_remove.pop(k_remove)
+
+        # remove from relation
+        count = 0
+        relation_remove_list.sort()  # perform lower index removals first to avoid issues with negative indexing
+        for r in relation_remove_list:
+            relation.pop(r - count)
+            count += 1  # accounts for offset from deleting tuples at a lower index than this one
+
+        # check that key_to_remove is empty (error if not)
+        if not key_to_remove:  # empty relations evaluate to boolean false
+            # TODO error    dev error.  Tried to delete a tuple that does not exist
+            pass
+
+    else:
+        # TODO error    dev mistake. Data type besides list of ints or list of lists are not allows
+        pass
+
+    # write remaining relation back to file
+    file = open(table_obj.storage.filename, "rb+")
+    file.seek(8, 0)  # leave space for the index_list header
+    file.truncate()  # delete rest of file contents (overwrite it)
+    index_list = []
+
+
+    # determine location of index_attr in tuples of the relation
+    index_loc = table_obj.storage.attr_loc[table_obj.storage.index_attr]
+
+    # insert tuple at back of file (same address tuple_index used to be at)
+    for obj in relation:
+        if type(obj) is not list:  # error checking
+            # TODO error    (developer error)
+            print("ERROR: dev error in backend.remove write back")
+
+        # write tuple to file
+        loc = file.tell()
+        index_list.append(loc)  # record tuple location in file
+        pickle.dump(obj, file)  # append tuple to the file
+
+        # check if attribute value already in the index, if not --> make an empty list
+        if obj[index_loc] not in table_obj.storage.index:
+            table_obj.storage.index[obj[index_loc]] = []
+
+        # add tuple location to the index
+        table_obj.storage.index[obj[index_loc]].append(loc)
+    list_loc = file.tell()
+    pickle.dump(index_list, file)
+    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
+    file.write(struct.pack("L", list_loc))
+    file.close()
+# END remove_index
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# update function
+#   need this in addition to the write function since write either inserts to back or
+#       overwites existing data
+#   pass in list of lists (list of instances) that contain the updates
+#   pass in a list of the same size that contains a list of indices to update
+def update_index(table_obj, update_list, index_list):
+    # cheap way to update with an index --> update as if no index
+    update(table_obj, update_list, index_list)
+
+    # then update index after all updates (create_index does not check for any existing indices)
+    create_index(table_obj, table_obj.storage.index_name, table_obj.storage.index_attr)
+# END update_index
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -539,6 +862,11 @@ def task_manager():
     table.name = "test_rel"
     create_relation(table, STORAGE_DIR)
     access(table)
+
+    inp = [["Andrew", 21, 1999]]
+    write(table, inp)
+
+    print(access(table))
 
 
 # END task_manager
