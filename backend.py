@@ -158,14 +158,6 @@ class DDL:
 
 
 
-
-
-
-
-
-
-
-
 #   Additional classes needed for use in backend
 # Storage class
 class Storage:
@@ -184,13 +176,23 @@ class Storage:
 #   TODO    #
 #           #
 
-#   determine how access paths will work (on index, on primary key --> linear search, or on simple linear search for a match if no primary key specified)
-#   make a second low-level access function to be called when an indexed attribute (ex. primary key) is being searched on
+# implement mid level functions
+# test low level functions (access_index, write_index, update_index, remove_index)
+# Storage.num_tuples is not being updated by index-based functions
 
-#   Determine how indexes will work and implement
 
-#   would an attribute-specific storage be more effective than a tuple-specific storage considering the operations we perform --> tuple-specific is good for doing selections first while attribute-specific storage is good for doing projections first
 
+
+
+
+
+
+
+# standardized error function  --> should be in main driver program ... here temporarily
+def error(st=" parsing error. Invalid syntax or input."):
+    print("\nERROR: ", st)
+    raise ValueError
+# END error
 
 
 
@@ -211,9 +213,7 @@ def access(table_obj):
     
     # check existence of Storage object
     if type(table_obj.storage) is object:
-        # TODO error    Storage object has not been created, so we cannot access it
-        print("ERROR")
-        pass
+        error("storage object not created.")
 
     # get index_list from file
     file = open(table_obj.storage.filename, "rb")
@@ -255,9 +255,7 @@ def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of
 
     # check existence of Storage object
     if type(table_obj.storage) is object:
-        # TODO error    Storage object has not been created, so we cannot access it
-        print("ERROR")
-        pass
+        error("storage object not created.")
 
     # get index_list from file
     file = open(table_obj.storage.filename, "rb+")
@@ -269,9 +267,8 @@ def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of
     file.seek(list_location, 0)  # seek list location
     for obj in obj_to_insert:
         if type(obj) is not list:           # error checking
-            # TODO error    (developer error)
-            print("ERROR: dev error in backend.write")
-
+            error("dev error in backend.write")
+        table_obj.storage.num_tuples += 1
         index_list.append(file.tell())      # record tuple location in file
         pickle.dump(obj, file)              # append tuple to the file
     list_loc = file.tell()
@@ -297,12 +294,10 @@ def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of
 def update(table_obj, update_list, index_list):
     # check Storage object exists
     if type(table_obj.storage) is object:
-        # TODO error    no underlying data structure existz
-        pass
+        error("storage object not created.")
 
     if len(update_list) != len(index_list):
-        # TODO error    dev error.  Lists must be the same length
-        pass
+        error("input lists to update function must be same length.")
 
     # open file, get index list
     file = open(table_obj.storage.filename, "rb+")
@@ -334,7 +329,7 @@ def update(table_obj, update_list, index_list):
 
     # record new location of index list
     list_loc = file.tell()
-    pickle.dump(index_list, file)
+    pickle.dump(file_index_list, file)
     file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
     file.write(struct.pack("L", list_loc))
 
@@ -348,18 +343,17 @@ def update(table_obj, update_list, index_list):
 # remove function
 #   (for removing a particular attribute/tuple from the DB.  update relevant indices as well)
 def remove(table_obj, key_to_remove):
-    # TODO decide how key_to_remove should work --> list of tuples to remove? list of keys or tuple indices to remove?
+    # list of ints or a list of lists
     
     # check Storage obj exists
     if type(table_obj.storage) is object:
-        # TODO error
-        pass
+        error("storage object not created.")
     
     # if list of indices, remove item at that index
     relation = []
-    if type(key_to_remove[0]) is not int:  # keys are in index form (like index number in the file/list --> tuple #)
+    if type(key_to_remove[0]) is int:  # keys are in index form (like index number in the file/list --> tuple #)
         # sort from largest to smallest (delete from back first --> less copying of the list)
-        keys_to_remove.sort(reverse=True)
+        key_to_remove.sort(reverse=True)
 
         # access relation
         relation = access(table_obj)
@@ -367,6 +361,7 @@ def remove(table_obj, key_to_remove):
         # delete specified tuples
         for i in key_to_remove:
             relation.pop(i)     # trust in calling function that index is valid
+            table_obj.storage.num_tuples -= 1
 
     # if list of lists (match them on primary key (if exists) and remove.  if no primary key, then match entire lists to lists in file to remove proper one)
     elif type(key_to_remove[0]) is list:
@@ -376,16 +371,18 @@ def remove(table_obj, key_to_remove):
         # loop through and match and delete specified tuples
         relation_remove_list = []
         for tup in range(len(relation)):
-            k_remove = val
+            k_remove = -1
             for k in range(len(key_to_remove)):
                 if relation[tup] == key_to_remove[k]:       # multiple linear search for a match
                     # match found, mark both to be removed
-                    k_remove = val
-                    relation_remove_list.append(rel)
+                    k_remove = k
+                    relation_remove_list.append(tup)
+                    table_obj.storage.num_tuples -= 1
                     break                                   # outer loop tuple was found, move onto the next one
 
             # remove tuple that is found from key_to_remove list
-            key_to_remove.pop(k_remove)
+            if k_remove != -1:
+                key_to_remove.pop(k_remove)
 
         # remove from relation
         count = 0
@@ -395,13 +392,11 @@ def remove(table_obj, key_to_remove):
             count += 1      # accounts for offset from deleting tuples at a lower index than this one
 
         # check that key_to_remove is empty (error if not)
-        if not key_to_remove:   # empty relations evaluate to boolean false
-            # TODO error    dev error.  Tried to delete a tuple that does not exist
-            pass
+        if len(key_to_remove):   # empty relations evaluate to boolean false
+            error("trying to remove a tuple that does not exist.")
 
     else:
-        # TODO error    dev mistake. Data type besides list of ints or list of lists are not allows
-        pass
+        error("input must be an integer index in the relation or a list of lists")
 
 
 
@@ -414,8 +409,7 @@ def remove(table_obj, key_to_remove):
     # insert tuple at back of file (same address tuple_index used to be at)
     for obj in relation:
         if type(obj) is not list:  # error checking
-            # TODO error    (developer error)
-            print("ERROR: dev error in backend.remove write back")
+            error("backend.remove write back")
 
         index_list.append(file.tell())  # record tuple location in file
         pickle.dump(obj, file)  # append tuple to the file
@@ -457,8 +451,7 @@ def create_relation_storage(table_obj, storage_dir):
 def delete_relation_storage(table_obj):
     # check if Storage object exists
     if type(table_obj.storage) is object:
-        # TODO error
-        pass
+        error("storage object not created.")
     
     # delete file
     os.remove(table_obj.storage.filename)
@@ -476,8 +469,7 @@ def delete_relation_storage(table_obj):
 # create index function (create the underlying data structure for an index) --> only call on tables with a Storage obj defined
 def create_index(table_obj, index_name, attr):  # index_name is user specified index name.  Attr is the attribute the index is on
     if type(table_obj.storage) is object:
-        # TODO error    no underlying data structure declared for table
-        pass
+        error("storage object not created.")
 
     # open file
     file = open(table_obj.storage.filename, "rb+")
@@ -496,8 +488,7 @@ def create_index(table_obj, index_name, attr):  # index_name is user specified i
 
     # determine which index in the tuples is attr
     if attr not in table_obj.storage.attr_loc:
-        # TODO error    tried to create an index on nonexistent attribute
-        pass
+        error("tried to create an index on nonexistent attribute.")
 
     attr_location = table_obj.storage.attr_loc[attr]
 
@@ -509,12 +500,13 @@ def create_index(table_obj, index_name, attr):  # index_name is user specified i
             table_obj.storage.index[relation[r][attr_location]] = []    # allows indexing on non-keys if necessary
 
         # add file location to the index
-        table_obj.storage.index.append(index_list[r])
+        table_obj.storage.index[relation[r][attr_location]].append(index_list[r])
 
 
     # add this index to INDEX
     INDEX[index_name] = table_obj.name
     table_obj.storage.index_name = index_name
+    table_obj.storage.index_attr = attr
 # END create_index
 
 
@@ -525,12 +517,10 @@ def create_index(table_obj, index_name, attr):  # index_name is user specified i
 # delete index function (delete an existing index)
 def delete_index(table_obj, index_name):
     if index_name not in INDEX:
-        # TODO error    trying to delete a non-existent index
-        pass
+        error("trying to delete a non-existent index.")
 
     # remove key from INDEX
     INDEX.pop(index_name)
-
 
     # delete contents of index data structure
     table_obj.storage.index = {}
@@ -548,19 +538,15 @@ def delete_index(table_obj, index_name):
 def access_index(table_obj, index_val, index_name):
     # check storage object exists
     if type(table_obj.storage) is object:
-        # TODO error    no underlying DS
-        pass
+        error("storage object not created.")
 
     # check index validity
     if index_name not in INDEX:
-        # TODO error
-        pass
+        error("trying to access a nonexistent index.")
     elif INDEX[index_name] != table_obj.name:
-        # TODO error
-        pass
+        error("index specified does not match table.")
     elif index_val not in table_obj.storage.index:
-        # TODO error
-        pass
+        error("specified index key does not exist in index.")
 
     # open file
     file = open(table_obj.storage.filename, "rb")
@@ -590,14 +576,11 @@ def access_index(table_obj, index_val, index_name):
 def write_index(table_obj, obj_to_insert):
     # check existence of Storage object
     if type(table_obj.storage) is object:
-        # TODO error    Storage object has not been created, so we cannot access it
-        print("ERROR")
-        pass
+        error("storage object not created.")
 
     # check index validity
     if table_obj.storage.index_attr == "":
-        # TODO error    no index attribute specified --> no index exists for this table
-        pass
+        error("cannot write to a nonexistent index.")
 
     # get the location in the tuple that the index key is stored at
     index_key = table_obj.storage.attr_loc[table_obj.storage.index_attr]
@@ -613,8 +596,7 @@ def write_index(table_obj, obj_to_insert):
     for obj in obj_to_insert:
         # error checking in function input
         if type(obj) is not list:
-            # TODO error    (developer error)
-            print("ERROR: dev error in backend.write")
+            error("backend.write invalid input format.")
 
         # add tuple to file
         loc = file.tell()
@@ -648,13 +630,11 @@ def write_index(table_obj, obj_to_insert):
 def remove_index(table_obj, key_to_remove):
     # check Storage obj exists
     if type(table_obj.storage) is object:
-        # TODO error
-        pass
+        error("storage object not created.")
 
     # check index validity
     if table_obj.storage.index_attr == "":
-        # TODO error    no index to update
-        pass
+        error("called remove_index on a nonexistent index.")
 
     # clear the current index, all going to be overwritten in writing back to the file
     table_obj.storage.index = {}
@@ -700,12 +680,11 @@ def remove_index(table_obj, key_to_remove):
 
         # check that key_to_remove is empty (error if not)
         if not key_to_remove:  # empty relations evaluate to boolean false
-            # TODO error    dev error.  Tried to delete a tuple that does not exist
+            error("tried to delete a tuple that does not exist.")
             pass
 
     else:
-        # TODO error    dev mistake. Data type besides list of ints or list of lists are not allows
-        pass
+        error("invalid input not an integer or a list of lists.")
 
     # write remaining relation back to file
     file = open(table_obj.storage.filename, "rb+")
@@ -720,8 +699,7 @@ def remove_index(table_obj, key_to_remove):
     # insert tuple at back of file (same address tuple_index used to be at)
     for obj in relation:
         if type(obj) is not list:  # error checking
-            # TODO error    (developer error)
-            print("ERROR: dev error in backend.remove write back")
+            error("backend.remove write back invalid input format (not a list)")
 
         # write tuple to file
         loc = file.tell()
@@ -794,6 +772,54 @@ def update_index(table_obj, update_list, index_list):
 #
 #   Mid level functions
 #
+
+
+# create table      attr is an ordered list tuples containing attributes
+def create_table(table_name, attr):
+    # input validation
+    if table_name in TABLES:
+        error("relations cannot share names.")
+
+    if type(attr) is not list:
+        error("attr must be a list.")
+
+    # create Table object and populate it
+    table = Table()
+    table.name = table_name
+    table.num_attributes = len(attr)
+
+    table.attribute_names.clear()
+    table.attributes.clear()
+
+    for at in attr:
+        table.attribute_names.add(at[0])
+        attr_obj = Attribute()
+        attr_obj.name = at[0]       # index 0 of the tuple is attribute name
+        attr_obj.type = at[1]       # index 1 of the tuple is attribute type (a string)
+        table.attributes.append(attr_obj)
+
+
+    # create storage structure for this relation
+    create_relation_storage(table, STORAGE_DIR)
+
+    # populate dictionary of attribute locations
+    for i in range(len(attr)):
+        table.storage.attr_loc[attr[i][0]] = i  # map attribute name to its location in the stored tuple
+
+    # add this table to the global dictionary of tables
+    TABLES[table_name] = table
+
+    # return the initialized Table object
+    return table
+# END create_table
+
+
+
+
+
+
+
+
 # select function
 
 
@@ -858,15 +884,29 @@ def update_index(table_obj, update_list, index_list):
 #
 # task manager function.  Takes output from optimizer and calls necessary backend functions to execute the query
 def task_manager():
-    table = Table()
-    table.name = "test_rel"
-    create_relation(table, STORAGE_DIR)
+    table = create_table("test_rel", [("name", "string"), ("age", "int"), ("year", "int")])
     access(table)
 
-    inp = [["Andrew", 21, 1999]]
+    inp = [["Andrew", 21, 1999], ["Bob", 83, 1800]]
     write(table, inp)
 
     print(access(table))
+
+    update(table, [["Joe", 56, 1955]], [1])
+
+    print(access(table))
+
+
+
+
+
+
+    create_index(table, "test_ind", "name")
+
+
+
+
+
 
 
 # END task_manager
