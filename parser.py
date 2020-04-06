@@ -60,6 +60,7 @@ class Query:
         ### object attributes ###
         self.select_attr = []       # give as tuple of (table name, attr name) --> only one table in from then table name can be ""
         self.from_tables = {}       # use alias/table name as key --> maps to table name (simplifies parsing)
+        self.alias = set()          # need a record of what is an alias in from_tables --> set of strings (only for membership checks)
         self.where = object()       # root to tree of Comparison objects.  object just a placeholder
         self.num_tables = 0
 
@@ -149,6 +150,7 @@ class DDL:
 #   TODO    #
 #           #
 #   check num tables counting (definitely wrong when joins involved)
+#   check validation issues with joins --> when only one join and no other tables then using no table specifier with an attribute is ok despite having 2 tables
 #   test validation checks
 #   test DML insert, update, delete parsing
 #   test DDL create/drop table/index
@@ -527,28 +529,6 @@ def parse_query(this_query, inp_line):
         from_clause = inp_line[(select_end + len("from")): from_end]
         where_clause = inp_line[(from_end + len("where")):]
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         ### parse FROM ###
         # tokenize on ',' to separate table names
         from_list = from_clause.split(',')
@@ -634,6 +614,7 @@ def parse_query(this_query, inp_line):
                             # table exists.  put both alias and table name into from_tables (put into from_tables)
                             this_query.from_tables[alias_list[1]] = alias_list[0]
                             this_query.from_tables[alias_list[0]] = alias_list[0]
+                            this_query.alias.add(alias_list[1])
                             left_name = alias_list[0]
                         else:
                             error("nonexistent table used in FROM clause")
@@ -664,6 +645,7 @@ def parse_query(this_query, inp_line):
                             # table exists.  put both alias and table name into from_tables (put into from_tables)
                             this_query.from_tables[alias_list[1]] = alias_list[0]
                             this_query.from_tables[alias_list[0]] = alias_list[0]
+                            this_query.alias.add(alias_list[1])
                             right_name = alias_list[0]
                         else:
                             error("nonexistent table used in FROM clause")
@@ -727,6 +709,7 @@ def parse_query(this_query, inp_line):
                         # table exists.  put both alias and table name into from_tables (put into from_tables)
                         this_query.from_tables[alias_list[1]] = alias_list[0]
                         this_query.from_tables[alias_list[0]] = alias_list[0]
+                        this_query.alias.add(alias_list[1])
                     else:
                         error("nonexistent table used in FROM clause")
                 else:
