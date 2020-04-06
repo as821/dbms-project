@@ -821,19 +821,120 @@ def create_table(table_name, attr):
 
 
 # select function
+# relations are a list of lists.  Condition is a comparison object (should be atomic not contain other Comparison objects)
+# attr_index specifies the index of the attribute to be compared in the relation (which column number) --> avoid needing table knowledge here
+# if only trying to perform a one-table selection, only populate relation1, condition, and attr_index1. Leave rest null
+def select(relation1, relation2, condition, attr_index1, attr_index2):
+    # Comparison object (table name, attribute name) --> already given relation, so
+    # TODO for now, assume that attribute to compare is in left_operand (not an unreasonable assumption)
+
+    # determine value to compare against
+    if type(condition.left_operand) == tuple:
+        if type(condition.right_operand) == tuple:
+            # TODO join.  Comparison between table attributes.  Best performed with a join (theta join or natural join)
+            pass
+        else:
+            value = condition.right_operand
+    else:
+        value = condition.left_operand
 
 
+    # perform a standard selection (one table)
+    # loop through relation and perform operation
+    return_relation = []
+    for instance in range(len(relation1)):
+        if condition.equal:
+            if relation1[instance][attr_index] == value:
+                return_relation.append(relation1[instance])
+        elif condition.not_equal:
+            if relation1[instance][attr_index] != value:
+                return_relation.append(relation1[instance])
+        elif condition.greater:
+            if relation1[instance][attr_index] > value:
+                return_relation.append(relation1[instance])
+        elif condition.less:
+            if relation1[instance][attr_index] < value:
+                return_relation.append(relation1[instance])
+        elif condition.great_equal:
+            if relation1[instance][attr_index] >= value:
+                return_relation.append(relation1[instance])
+        elif condition.less_equal:
+            if relation1[instance][attr_index] <= value:
+                return_relation.append(relation1[instance])
+        else:
+            error(" no operation specified in condition.")
+    return return_relation
+# END select
 
 
 
 # projection function
+# relation is list of lists.  Indexes are the indices of the attributes to include in the returned relation
+def projection(relation, indexes):
+    if type(indexes) is not list:
+        error(" indexes parameter to projection function must be a list of integers.")
+    return_relation = list()
+    for instance in relation:
+        tup = list()
+        for i in indexes:
+            tup.append(instance[i])
+        return_relation.append(tup)
 
 
+    # TODO remove duplicates
+    return return_relation
+# END projection
 
 
 
 
 # join function (pass a parameter to signify which join to do)  --> need to consider which kind of join in best.  This probably should be handled by the optimizer
+# relation1 and relation2 are list of lists
+# attr1 and attr2 are attribute indexes (specified by ON clause)
+# typ refers to the type of join --> (equi, outer, left, right)  outer refers to full outer join.  Left and right are outer joins
+# natural join --> specify equi and perform extra work in calling function to find attributes where names match up
+def join(relation1, relation2, attr1, attr2, typ):
+    return_relation = []
+    if typ == "equi":
+
+
+
+
+        pass
+    elif typ == "outer":
+
+
+
+
+
+
+        pass
+    elif typ == "left":
+
+
+
+
+
+
+        pass
+    elif typ == "right":
+
+
+
+
+
+
+
+        pass
+    else:
+        error(" invalid join type specified")
+
+
+
+
+
+    return return_relation
+# END join
 
 
 
