@@ -894,46 +894,87 @@ def projection(relation, indexes):
 # typ refers to the type of join --> (equi, outer, left, right)  outer refers to full outer join.  Left and right are outer joins
 # natural join --> specify equi and perform extra work in calling function to find attributes where names match up
 def join(relation1, relation2, attr1, attr2, typ):
+
+    #
+    #   TODO add option for other type of join (currently always doing nested loop.  Want to support sort/merge too)
+    #
+
+
     return_relation = []
-    if typ == "equi":
+    if typ == "equi":       # equi join
+        for r1 in relation1:
+            for r2 in relation2:
+                if r1[attr1] == r2[attr2]:
+                    # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                    helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                    return_relation.append(helper)
+    elif typ == "outer":    # full outer join
+        for r1 in relation1:
+            for r2 in relation2:
+                if r1[attr1] == r2[attr2]:
+                    # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                    helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                    return_relation.append(helper)
+                else:
+                    # r1 --> pad back with nulls for the number of attributes in r2-1 (account for shared attribute)
+                    left_helper = r1
+                    for i in range(len(r2)-1):  # -1 to account for shared attribute
+                        left_helper.append(None)
 
+                    # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
+                    right_helper = []
+                    for i in range(len(r1)):
+                        if i == attr1:
+                            right_helper.append(r2[attr2])
+                        else:
+                            right_helper.append(None)
+                    for i in range(len(r2)):
+                        if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
+                            right_helper.append(r2[i])
 
+                    # add both r1 and r2 to return relation
+                    return_relation.append(left_helper)
+                    return_relation.append(right_helper)
+    elif typ == "left":     # left outer join
+        for r1 in relation1:
+            for r2 in relation2:
+                if r1[attr1] == r2[attr2]:
+                    # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                    helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                    return_relation.append(helper)
+                else:
+                    # r1 --> pad back with nulls for the number of attributes in r2-1 (account for shared attribute)
+                    left_helper = r1
+                    for i in range(len(r2)-1):  # -1 to account for shared attribute
+                        left_helper.append(None)
 
+                    # add r1 (from left relation) to return relation
+                    return_relation.append(left_helper)
+    elif typ == "right":    # right outer join
+        for r1 in relation1:
+            for r2 in relation2:
+                if r1[attr1] == r2[attr2]:
+                    # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                    helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                    return_relation.append(helper)
+                else:
+                    # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
+                    right_helper = []
+                    for i in range(len(r1)):
+                        if i == attr1:
+                            right_helper.append(r2[attr2])
+                        else:
+                            right_helper.append(None)
+                    for i in range(len(r2)):
+                        if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
+                            right_helper.append(r2[i])
 
-        pass
-    elif typ == "outer":
-
-
-
-
-
-
-        pass
-    elif typ == "left":
-
-
-
-
-
-
-        pass
-    elif typ == "right":
-
-
-
-
-
-
-
-        pass
+                    # add both r2 (right relation) to return relation
+                    return_relation.append(right_helper)
     else:
         error(" invalid join type specified")
 
-
-
-
-
-    return return_relation
+    return list(set(return_relation))   # remove duplicates
 # END join
 
 
