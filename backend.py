@@ -178,6 +178,7 @@ class Storage:
 
 # implement mid level functions
 # test low level functions (access_index, write_index, update_index, remove_index)
+# test mid level functions (select, projection, join)
 # Storage.num_tuples is not being updated by index-based functions
 
 
@@ -824,15 +825,19 @@ def create_table(table_name, attr):
 # relations are a list of lists.  Condition is a comparison object (should be atomic not contain other Comparison objects)
 # attr_index specifies the index of the attribute to be compared in the relation (which column number) --> avoid needing table knowledge here
 # if only trying to perform a one-table selection, only populate relation1, condition, and attr_index1. Leave rest null
-def select(relation1, relation2, condition, attr_index1, attr_index2):
-    # Comparison object (table name, attribute name) --> already given relation, so
-    # TODO for now, assume that attribute to compare is in left_operand (not an unreasonable assumption)
+def selection(relation1, relation2, condition, attr_index1, attr_index2):
+    return_relation = []
 
     # determine value to compare against
     if type(condition.left_operand) == tuple:
         if type(condition.right_operand) == tuple:
             # TODO join.  Comparison between table attributes.  Best performed with a join (theta join or natural join)
-            pass
+            # perform a join to perform this as an equi join
+            if condition.equal:
+                return_relation = join(relation1, relation2, attr_index1, attr_index2, "equi")
+            else:
+                error(" only equality comparison permitted for conditions comparing attribute values from 2 tables.")
+            return return_relation
         else:
             value = condition.right_operand
     else:
@@ -841,7 +846,6 @@ def select(relation1, relation2, condition, attr_index1, attr_index2):
 
     # perform a standard selection (one table)
     # loop through relation and perform operation
-    return_relation = []
     for instance in range(len(relation1)):
         if condition.equal:
             if relation1[instance][attr_index] == value:
