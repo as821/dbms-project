@@ -78,7 +78,7 @@ class Query:
         self.avg = []
 
         # handle joins
-        self.joins = []         # list of joins in the order they were found in the query. Tuple (join_type, table1, table2)
+        self.joins = []         # list of joins in the order they were found in the query. Tuple (join_type, table1, table2, left_on, right_on)
 # END Query class
 
 
@@ -594,10 +594,10 @@ def parse_query(this_query, inp_line):
                         right_o = o[1].split(".")
                         if len(right_o) > 1:
                             # table specified
-                            left_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
+                            right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
                         else:
                             # table not specified
-                            left_on = ("", right_o[0])
+                            right_on = ("", right_o[0])
 
 
                     # determine aliasing of join tables
@@ -692,8 +692,279 @@ def parse_query(this_query, inp_line):
 
                 else:
                     # multiple joins --> comma missing (syntax specific to this parser --> too many SQL flavors to know
-                    # how to parse multiple joins in a "standard way".  SQL in slides contradicts what is online.)
-                    error(" comma missing between joins.  Needed for parser to separate multiple joins from one another.")
+
+
+
+
+
+
+
+
+
+
+
+                    # know there are multiple joins --> know what type of joins to perform.  Split on join so specifier is in the preceding partition
+                    join_types = []
+                    for i in range(len(joins)):
+                        if i > 0:
+                            t = ""
+                            if " left outer" in joins[i-1]:
+                                t = "left"
+                                joins[i-1] = re.split(" left outer", joins[i-1])[0]     # strip off join specifier
+                            elif " right outer" in joins[i-1]:
+                                t = "right"
+                                joins[i-1] = re.split(" right outer", joins[i-1])[0]    # strip off join specifier
+                            elif " natural" in joins[i-1]:
+                                t = "natural"
+                                joins[i-1] = re.split(" natural", joins[i-1])[0]        # strip off join specifier
+                            elif " full outer" in joins[i-1]:
+                                t = "full"
+                                joins[i-1] = re.split(" full outer", joins[i-1])[0]     # strip off join specifier
+                            else:
+                                error(" unknown type of join in multiple join parsing.")
+                            join_types.append(t)
+
+
+
+                    # split into multiple joins --> create a sequential list of joins that will be parsed after first one handled
+                    for i in range(len(joins)):
+                        if i < 2:
+                            if i == 0:
+                                # parse both left and right sides
+
+                                on_clause = True
+                                join_type = join_types[0]
+                                if join_type == "natural":
+                                    on_clause = False
+
+                                left_side = joins[0]
+                                right_side = joins[1]
+
+                                # split off ON clause (if exists)
+                                left_on = ()
+                                right_on = ()
+                                if on_clause:
+                                    # break clause up into operands --> validate at end of iteration to allow for the use of aliases
+                                    clause = re.split(" on ", right_side)
+                                    right_side = clause[0].lstrip().rstrip()
+                                    o = clause[1].split(" = ")
+
+                                    # parse left side of ON clause
+                                    left_o = o[0].split(".")
+                                    if len(left_o) > 1:
+                                        # table specified
+                                        left_on = (left_o[0].lstrip().rstrip(), left_o[1].lstrip().rstrip())
+                                    else:
+                                        # table not specified
+                                        left_on = ("", left_o[0])
+
+                                    # parse right side of ON clause
+                                    right_o = o[1].split(".")
+                                    if len(right_o) > 1:
+                                        # table specified
+                                        right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
+                                    else:
+                                        # table not specified
+                                        right_on = ("", right_o[0])
+
+                                # determine aliasing of join tables
+                                # left
+                                left_name = ""
+                                alias_list = re.split(" as ", left_side)
+                                if len(alias_list) > 1:
+                                    # strip whitespace off alias and name
+                                    alias_list[0] = alias_list[0].rstrip().lstrip()
+                                    alias_list[1] = alias_list[1].rstrip().lstrip()
+
+                                    # validate table existence (alias_list[0])
+                                    if alias_list[0] in TABLES:
+                                        # table exists.  put both alias and table name into from_tables (put into from_tables)
+                                        this_query.from_tables[alias_list[1]] = alias_list[0]
+                                        this_query.from_tables[alias_list[0]] = alias_list[0]
+                                        this_query.alias.add(alias_list[1])
+                                        left_name = alias_list[0]
+                                    else:
+                                        error("nonexistent table used in FROM clause")
+
+                                else:
+                                    # no alias found, just insert to query from_table
+                                    # strip whitespace from ends
+                                    name = name.rstrip().lstrip()
+
+                                    # validate table name
+                                    if name in TABLES:
+                                        this_query.from_tables[name] = name
+                                        left_name = name
+                                    else:
+                                        error("nonexistent table used in FROM clause")
+
+                                # right
+                                alias_list = []  # empty list, just to be safe
+                                right_name = ""
+                                alias_list = re.split(" as ", right_side)
+                                if len(alias_list) > 1:
+                                    # strip whitespace off alias and name
+                                    alias_list[0] = alias_list[0].rstrip().lstrip()
+                                    alias_list[1] = alias_list[1].rstrip().lstrip()
+
+                                    # validate table existence (alias_list[0])
+                                    if alias_list[0] in TABLES:
+                                        # table exists.  put both alias and table name into from_tables (put into from_tables)
+                                        this_query.from_tables[alias_list[1]] = alias_list[0]
+                                        this_query.from_tables[alias_list[0]] = alias_list[0]
+                                        this_query.alias.add(alias_list[1])
+                                        right_name = alias_list[0]
+                                    else:
+                                        error("nonexistent table used in FROM clause")
+                                else:
+                                    # no alias found, just insert to query from_table
+                                    # strip whitespace from ends
+                                    name = name.rstrip().lstrip()
+
+                                    # validate table name
+                                    if name in TABLES:
+                                        this_query.from_tables[name] = name
+                                        right_name = name
+                                    else:
+                                        error("nonexistent table used in FROM clause")
+
+                                # validate ON clause contents, if they exist
+                                if on_clause:
+                                    # validate left
+                                    if left_on[0] == "":
+                                        if this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                                            error(
+                                                " ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                                    else:
+                                        # table specified, validate
+                                        if left_on[0] in TABLES:
+                                            if left_on[1] not in TABLES[left_on[0]].attribute_names:
+                                                error(
+                                                    " nonexistent attribute name in join ON clause.  Valid table name.")
+                                        else:
+                                            error(" invalid table name in join ON clause.")
+
+                                    # validate right
+                                    if right_on[0] == "":
+                                        if this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                                            error(
+                                                " ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                                    else:
+                                        # table specified, validate
+                                        if right_on[0] in TABLES:
+                                            if right_on[1] not in TABLES[right_on[0]].attribute_names:
+                                                error(
+                                                    " nonexistent attribute name in join ON clause.  Valid table name.")
+                                        else:
+                                            error(" invalid table name in join ON clause.")
+
+                                # add join to this_query
+                                this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
+
+                            else:
+                                pass        # do nothing for the middle partition (i == 1)
+                        else:
+                            # all remaining joins are appended to the first one.  Only have to examine right side since left has been parsed already
+                            # parse right side and take previous right table name as the left table for this join
+                            on_clause = True
+                            join_type = join_types[i-1]
+                            if join_type == "natural":
+                                on_clause = False
+
+                            right_side = joins[i]
+
+                            # split off ON clause (if exists)
+                            left_on = ()
+                            right_on = ()
+                            if on_clause:
+                                # break clause up into operands --> validate at end of iteration to allow for the use of aliases
+                                clause = re.split(" on ", right_side)
+                                right_side = clause[0].lstrip().rstrip()
+                                o = clause[1].split(" = ")
+
+                                # parse left side of ON clause
+                                left_o = o[0].split(".")
+                                if len(left_o) > 1:
+                                    # table specified
+                                    left_on = (left_o[0].lstrip().rstrip(), left_o[1].lstrip().rstrip())
+                                else:
+                                    # table not specified
+                                    left_on = ("", left_o[0])
+
+                                # parse right side of ON clause
+                                right_o = o[1].split(".")
+                                if len(right_o) > 1:
+                                    # table specified
+                                    right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
+                                else:
+                                    # table not specified
+                                    right_on = ("", right_o[0])
+
+                            # determine aliasing of join tables
+
+                            # right alias checking
+                            alias_list = []
+                            right_name = ""
+                            alias_list = re.split(" as ", right_side)
+                            if len(alias_list) > 1:
+                                # strip whitespace off alias and name
+                                alias_list[0] = alias_list[0].rstrip().lstrip()
+                                alias_list[1] = alias_list[1].rstrip().lstrip()
+
+                                # validate table existence (alias_list[0])
+                                if alias_list[0] in TABLES:
+                                    # table exists.  put both alias and table name into from_tables (put into from_tables)
+                                    this_query.from_tables[alias_list[1]] = alias_list[0]
+                                    this_query.from_tables[alias_list[0]] = alias_list[0]
+                                    this_query.alias.add(alias_list[1])
+                                    right_name = alias_list[0]
+                                else:
+                                    error("nonexistent table used in FROM clause")
+                            else:
+                                # no alias found, just insert to query from_table
+                                # strip whitespace from ends
+                                name = name.rstrip().lstrip()
+
+                                # validate table name
+                                if name in TABLES:
+                                    this_query.from_tables[name] = name
+                                    right_name = name
+                                else:
+                                    error("nonexistent table used in FROM clause")
+
+                            # validate ON clause contents, if they exist
+                            if on_clause:
+                                # validate left
+                                if left_on[0] == "":
+                                    if this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                                        error(
+                                            " ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                                else:
+                                    # table specified, validate
+                                    if left_on[0] in TABLES:
+                                        if left_on[1] not in TABLES[left_on[0]].attribute_names:
+                                            error(
+                                                " nonexistent attribute name in join ON clause.  Valid table name.")
+                                    else:
+                                        error(" invalid table name in join ON clause.")
+
+                                # validate right
+                                if right_on[0] == "":
+                                    if this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                                        error(
+                                            " ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                                else:
+                                    # table specified, validate
+                                    if right_on[0] in TABLES:
+                                        if right_on[1] not in TABLES[right_on[0]].attribute_names:
+                                            error(
+                                                " nonexistent attribute name in join ON clause.  Valid table name.")
+                                    else:
+                                        error(" invalid table name in join ON clause.")
+
+                            # add join to this_query
+                            left_name = this_query.joins[-1][2]     # take the right table name from the preceding join and use that as the left name for this join
+                            this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
 
             else:       # no joins in this section of FROM clause
                 # check each table name for "as" --> recognize aliases and add to from_tables
