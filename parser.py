@@ -19,7 +19,7 @@ INDEX = {}      # map index name to table name.  Index stored in that table  (al
 # standardized error function  --> should be in main driver program ... here temporarily
 def error(st=" parsing error. Invalid syntax or input."):
     print("\nERROR:", st)
-    raise ValueError
+    # raise ValueError
 # END error
 
 
@@ -149,15 +149,9 @@ class DDL:
 #           #
 #   TODO    #
 #           #
-#   check num tables counting (definitely wrong when joins involved)
-#   check validation issues with joins --> when only one join and no other tables then using no table specifier with an attribute is ok despite having 2 tables
-#   test validation checks
 #   test DML insert, update, delete parsing
 #   test DDL create/drop table/index
-#   test where clause parsing with more complex comparisons
-#   test all join types
 
-#   update validation to support relations with the same name, but different set of columns?  --> probably not
 #   support NULLs? --> have to add another value to the tuples in DDL.attr (boolean for NULL/NOT NULL)
 #   add support for GROUPBY/HAVING clauses in "query" section
 #   include IN/BETWEEN too?
@@ -167,9 +161,38 @@ class DDL:
 
 
 def parser_main():  # parameter
-    # s: list of tables/columns, string of input
+    # TODO remove   debugging help
+    l = Table()
+    l.name = "tablea"
+    l.num_attributes = 3
+    l.attribute_names.add("emp#")
+    l.attribute_names.add("field2")
+    l.attribute_names.add("field3")
+    TABLES["tablea"] = l
+
+    l = Table()
+    l.name = "tableb"
+    l.num_attributes = 3
+    l.attribute_names.add("emp#")
+    l.attribute_names.add("field2")
+    l.attribute_names.add("field3")
+    TABLES["tableb"] = l
+
+    l = Table()
+    l.name = "tablec"
+    l.num_attributes = 3
+    l.attribute_names.add("emp#")
+    l.attribute_names.add("field2")
+    l.attribute_names.add("field3")
+    TABLES["tablec"] = l
+
+
+
+
+
+
     # take a string as input (contains entire query)
-    inp_line = "INSERT INTO table_name (emp#, field2, field3) VALUES (a, b, c, d)" # "SELECT * FROM table_name WHERE (emp# = 10) and (a = b)"
+    inp_line = "SELECT a.emp#, b.field2, max(a.field3) FROM tableA as a LEFT OUTER JOIN tableB ON a.emp# = b.emp# WHERE a.field2 = 10"
     inp_line = inp_line.lower()
 
 
@@ -544,31 +567,29 @@ def parse_query(this_query, inp_line):
                 # for each pair of partitions (table_info JOIN table_info --> (table_info1, table_info2))
                 # split on "join" --> more than 2 partitions? (means >1 join)
                 joins = re.split(" join ", name)
-                if len(joins) < 2:
+                # each partition contains one table name.  A rough measure (may double count some tables in edge cases, but only ever compared > 1 so is ok)
+                this_query.num_tables += len(joins)
+                if len(joins) <= 2:
                     # determine join type
                     join_type = ""
                     left_side = ""
                     on_clause = False
-                    if " natural " in joins[0]:
+                    if " natural" in joins[0]:
                         join_type = "natural"
-                        left_side = re.split(" natur", joins[0])[0]
-                    elif " outer " in joins[0]:
+                        left_side = re.split(" natural", joins[0])[0]
+                    elif " outer" in joins[0]:
                         if " left " in joins[0]:
                             join_type = "left_outer"
-                            left_side = re.split(" left ", joins[0])[0]
+                            left_side = re.split(" left outer", joins[0])[0]
                         elif " right " in joins[0]:
                             join_type = "right_outer"
-                            left_side = re.split(" right", joins[0])[0]
+                            left_side = re.split(" right outer", joins[0])[0]
                         else:
-                            join_type = "outer"
-                            left_side = re.split(" oute", joins[0])[0]
-                        on_clause = True
-                    elif " inner " in joins[0]:
-                        join_type = inner
-                        left_side = re.split(" inne", joins[0])[0]
+                            join_type = " full outer"
+                            left_side = re.split(" outer", joins[0])[0]
                         on_clause = True
                     else:
-                        error(" unrecognized join type.  Must be NATURAL, LEFT/RIGHT OUTER, OUTER, INNER.")
+                        error(" unrecognized join type.  Must be NATURAL, LEFT/RIGHT/FULL OUTER.")
 
 
                     # split off ON clause (if exists)
@@ -691,18 +712,6 @@ def parse_query(this_query, inp_line):
                     this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
 
                 else:
-                    # multiple joins --> comma missing (syntax specific to this parser --> too many SQL flavors to know
-
-
-
-
-
-
-
-
-
-
-
                     # know there are multiple joins --> know what type of joins to perform.  Split on join so specifier is in the preceding partition
                     join_types = []
                     for i in range(len(joins)):
@@ -937,10 +946,10 @@ def parse_query(this_query, inp_line):
                                 # validate left
                                 if left_on[0] == "":
                                     if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                        error(
-                                            " ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                                        error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
                                 else:
                                     # table specified, validate
+                                    left_on = (this_query.from_tables[left_on[0]], left_on[1])  # handle aliasing
                                     if left_on[0] in TABLES:
                                         if left_on[1] not in TABLES[left_on[0]].attribute_names:
                                             error(
@@ -955,6 +964,7 @@ def parse_query(this_query, inp_line):
                                             " ambiguous attribute name.  When >1 table used in query, need to specify table.")
                                 else:
                                     # table specified, validate
+                                    right_on = (this_query.from_tables[right_on[0]], right_on[1])
                                     if right_on[0] in TABLES:
                                         if right_on[1] not in TABLES[right_on[0]].attribute_names:
                                             error(
@@ -1001,49 +1011,76 @@ def parse_query(this_query, inp_line):
         for attr in range(len(select_list)):
             agg_list = select_list[attr].split("(")  # opening parenthesis is beginning of aggregate operator
             if len(agg_list) > 1:
-
+                # parse on parenthesis to get attribute name
                 close_paren_list = agg_list[1].split(')')
+                attr_name = close_paren_list[0].rstrip().lstrip()  # attr is between ( and ) and drop whitespace
+
+                # search for table name of attr
+                attr_list = attr_name.split(".")  # split to find if alias used
+                if len(attr_list) > 1:
+                    # table specified
+                    attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
+                elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                    pass
+                else:
+                    # only one table in from, dont need to specify table
+                    table_key = list(this_query.from_tables.keys())[
+                        0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+                    attr_tup = (this_query.from_tables[table_key], attr_name)
+
+                # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
+                if attr_tup[0] in TABLES:
+                    if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
+                        this_query.select_attr.append(attr_tup)
+                    else:
+                        error(" valid table name.  Invalid attribute in SELECT clause")
+                        pass
+                else:
+                    error(" invalid table used in SELECT clause")
+                    pass
+
+                # validate aggregate operator
                 if len(close_paren_list) != 2:
                     error(" invalid aggregate operator syntax")
                 else:
                     # identify any aggregate operators on select attributes
                     if " min(" in select_list[attr]:
-                        this_query.min.append(attr)
+                        this_query.min.append(attr_tup)     # need to store table name and attribute for later calculations
                     elif " max(" in select_list[attr]:
-                        this_query.max.appen(attr)
+                        this_query.max.append(attr_tup)
                     elif " avg(" in select_list[attr]:
-                        this_query.avg.append(attr)
+                        this_query.avg.append(attr_tup)
                     elif " count(" in select_list[attr]:    # any aggregate operators we are not going to support
                         error(" invalid aggregate operator included in SELECT.")
 
 
-                attr_name = close_paren_list[0].rstrip().lstrip()  # attr is between ( and ) and drop whitespace
             else:
                 attr_name = select_list[attr].lstrip().rstrip()  # no aggregate operator, so just strip whitespace
 
-            # search for table name of attr
-            attr_list = attr_name.split(".")  # split to find if alias used
-            if len(attr_list) > 1:
-                # table specified
-                attr_tup = (attr_list[0], attr_list[1])
-            elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                pass
-            else:
-                # only one table in from, dont need to specify table
-                table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
-                attr_tup = (this_query.from_tables[table_key], attr_name)
-
-            # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
-            if attr_tup[0] in TABLES:
-                if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
-                    this_query.select_attr.append(attr_tup)
-                else:
-                    error(" valid table name.  Invalid attribute in SELECT clause")
+                # search for table name of attr
+                attr_list = attr_name.split(".")  # split to find if alias used
+                if len(attr_list) > 1:
+                    # table specified
+                    attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
+                elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
+                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
                     pass
-            else:
-                error(" invalid table used in SELECT clause")
-                pass
+                else:
+                    # only one table in from, dont need to specify table
+                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+                    attr_tup = (this_query.from_tables[table_key], attr_name)
+
+                # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
+                if attr_tup[0] in TABLES:
+                    if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
+                        this_query.select_attr.append(attr_tup)
+                    else:
+                        error(" valid table name.  Invalid attribute in SELECT clause")
+                        pass
+                else:
+                    error(" invalid table used in SELECT clause")
+                    pass
 
         ### parse WHERE ###
         this_query.where = parse_where(this_query, where_clause)
@@ -1119,10 +1156,11 @@ def parse_where(this_query, where_clause):      # this_query included for table 
                 else:
                     helper = int(operand_list[operand])
             else:   # operand is a name of something (not a number)
-                attr_list = operand_list[operand].split(".")  # split to find if alias used  --> float issues?
+                attr_list = operand_list[operand].split(".")  # split to find if alias used
                 if len(attr_list) > 1:  # if a table name is specified
 
                     # validate attr_list here
+                    attr_list[0] = this_query.from_tables[attr_list[0]]     # converts alias if needed
                     if attr_list[0] in TABLES:
                         if attr_list[1] in TABLES[attr_list[0]].attribute_names:
                             helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
