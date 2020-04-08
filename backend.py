@@ -177,9 +177,7 @@ class Storage:
 #           #
 
 # implement mid level functions
-# test low level functions (access_index, write_index, update_index, remove_index)
 # test mid level functions (select, projection, join)
-# Storage.num_tuples is not being updated by index-based functions
 
 
 
@@ -342,7 +340,6 @@ def update(table_obj, update_list, index_list):
 
 
 # remove function
-#   (for removing a particular attribute/tuple from the DB.  update relevant indices as well)
 def remove(table_obj, key_to_remove):
     # list of ints or a list of lists
     
@@ -573,7 +570,7 @@ def access_index(table_obj, index_val, index_name):
 
 
 
-# write index
+# write index       obj_to_insert must be a list of lists, even if only inserting one tuple
 def write_index(table_obj, obj_to_insert):
     # check existence of Storage object
     if type(table_obj.storage) is object:
@@ -603,6 +600,7 @@ def write_index(table_obj, obj_to_insert):
         loc = file.tell()
         index_list.append(loc)  # record tuple location in file
         pickle.dump(obj, file)  # append tuple to the file
+        table_obj.storage.num_tuples += 1
 
         # record tuple location in index
         if obj[index_key] not in table_obj.storage.index:
@@ -642,15 +640,16 @@ def remove_index(table_obj, key_to_remove):
 
     # if list of indices, remove item at that index
     relation = []
-    if type(key_to_remove[0]) is not int:  # keys are in index form (like index number in the file/list --> tuple #)
+    if type(key_to_remove[0]) is int:  # keys are in index form (like index number in the file/list --> tuple #)
         # sort from largest to smallest (delete from back first --> less copying of the list)
-        keys_to_remove.sort(reverse=True)
+        key_to_remove.sort(reverse=True)
 
         # access relation
         relation = access(table_obj)
 
         # delete specified tuples
         for i in key_to_remove:
+            table_obj.storage.num_tuples -= 1
             relation.pop(i)  # trust in calling function that index is valid
 
     # if list of lists (match them on primary key (if exists) and remove.  if no primary key, then match entire lists to lists in file to remove proper one)
@@ -661,16 +660,18 @@ def remove_index(table_obj, key_to_remove):
         # loop through and match and delete specified tuples
         relation_remove_list = []
         for tup in range(len(relation)):
-            k_remove = val
+            k_remove = -1
             for k in range(len(key_to_remove)):
                 if relation[tup] == key_to_remove[k]:  # multiple linear search for a match
                     # match found, mark both to be removed
-                    k_remove = val
-                    relation_remove_list.append(rel)
+                    k_remove = k
+                    relation_remove_list.append(tup)
+                    table_obj.storage.num_tuples -= 1
                     break  # outer loop tuple was found, move onto the next one
 
             # remove tuple that is found from key_to_remove list
-            key_to_remove.pop(k_remove)
+            if k_remove != -1:
+                key_to_remove.pop(k_remove)
 
         # remove from relation
         count = 0
@@ -680,9 +681,8 @@ def remove_index(table_obj, key_to_remove):
             count += 1  # accounts for offset from deleting tuples at a lower index than this one
 
         # check that key_to_remove is empty (error if not)
-        if not key_to_remove:  # empty relations evaluate to boolean false
+        if len(key_to_remove) != 0:  # empty relations evaluate to boolean false
             error("tried to delete a tuple that does not exist.")
-            pass
 
     else:
         error("invalid input not an integer or a list of lists.")
@@ -987,7 +987,8 @@ def join(relation1, relation2, attr1, attr2, typ):
 
 
 
-# aggregate functions (min, max, sum)
+# aggregate functions (min, max, sum).  Given a relation (list of lists) and an attribute index.
+#       Ex. min --> return relation of all tuples where the value at the given index == the min value in that attribute
 
 
 
@@ -995,7 +996,7 @@ def join(relation1, relation2, attr1, attr2, typ):
 
 
 
-# set operations (given results from 2 selects, find difference, intersect, or union --> individual function for each)
+# set operations (given 2 relations, find difference, intersect, or union --> individual function for each)
 
 
 
@@ -1030,6 +1031,7 @@ def join(relation1, relation2, attr1, attr2, typ):
 #
 # task manager function.  Takes output from optimizer and calls necessary backend functions to execute the query
 def task_manager():
+    # table testing
     table = create_table("test_rel", [("name", "string"), ("age", "int"), ("year", "int")])
     access(table)
 
@@ -1039,7 +1041,6 @@ def task_manager():
     print(access(table))
 
     update(table, [["Joe", 56, 1955]], [1])
-
     print(access(table))
 
 
@@ -1047,7 +1048,18 @@ def task_manager():
 
 
 
+    # index testing
     create_index(table, "test_ind", "name")
+    print(access_index(table, "Andrew", "test_ind"))
+    write_index(table, [["Fred", 43, 1200]])
+    print(access(table))
+    remove_index(table, [['Joe', 56, 1955]])
+    print(access(table))
+    update_index(table, [["Rob", 100, 9]], [1])
+    print(access(table))
+    print(access_index(table, "Rob", "test_ind"))
+
+
 
 
 
