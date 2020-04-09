@@ -7,6 +7,23 @@ import parser
 # when accessing attribute from a table that was joined, redirect to the join.  from_tables maps original relation name to JOIN... name (these pre-join tables
 #       are the only non-alias strings left in from_tables)
 
+
+
+
+
+#
+#   TODO
+#
+#   TODO based on relative sizes of relations, determine what type of join (sort vs. linear) --> need to update the join function (backend.py) to reflect these options
+#   TODO pick outer loop for joins too (should be the smaller relation)
+#   TODO determine what joins to do first in the case of a multiple joins
+#   TODO add support for aggregate operators
+
+#   TODO be careful not to remove an attribute needed for a join in an early projection (!!! this is a current bug)
+
+
+
+
 def optimizer(this_query):
     # check that queries are atomic
     if this_query.union or this_query.intersect or this_query.difference:
@@ -32,21 +49,74 @@ def optimizer(this_query):
 
 
 
-    # simple query optimizer    (no access path checks, perform selections sequentially, then perform projections where appropriate,
-    #                           then joins sequentially)
+    # simple query optimizer    (perform joins sequentially)
+
 
 
 
 
 
     # load all relations needed for this query
-    for t in this_query.from_tables:
+    # look through selects for any indexed attributes (only have to retrieve samples with that given value
+    obtained = []
+    pop_list = []
+    for c in range(len(this_query.where)):
+        cond = this_query.where[c]
+        if cond.equal:
+            left = type(cond.left_operand) is tuple
+            right = type(cond.right_operand) is tuple
+
+            # if one of the operands is a tuple and the other is not
+            if left and not right:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.left_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+                    try:
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand,
+                                                                                     TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        obtained.append(cond.left_operand[0])
+                        pop_list.append(c)
+                    except ValueError:      # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                        obtained.append(cond.left_operand[0])
+            elif right and not left:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.right_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+                    try:
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand,
+                                                                                      TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        obtained.append(cond.right_operand[0])
+                        pop_list.append(c)
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                        obtained.append(cond.right_operand[0])
+
+    # remove those where clause selections that have already been performed using an index access path
+    count = 0
+    for c in pop_list:  # c will be sorted from the loop above this one
+        this_query.where.pop(c-count)   # need to subtract count to make up for indices removed in front of it
+        count += 1
+
+
+    # access remaining tables and load into memory
+    normal_access = list(set(this_query.from_tables) - set(obtained))   # set subtraction to remove those that have already been loaded
+    for t in normal_access:
         if t not in this_query.alias:   # if this entry is not an alias...
             this_query.from_tables[t] = (access(TABLES[t]), TABLES[t].storage.attr_loc)     # store relation and dictionary of attribute locations
 
 
+    # perform more restrictive selections first --> place any selections that involve a primary key to execute first
+    move_list = []
+    for c in range(len(this_query.where)):
+        if this_query.where[c].left_operand[1] == this_query.from_tables[this_query.where[c].left_operand[0]].primary_key:
+            move_list.append(c)
+        elif this_query.where[c].right_operand[1] == this_query.from_tables[this_query.where[c].right_operand[0]].primary_key:
+            move_list.append(c)
 
-
+    # shuffle selections to make optimal ordering
+    for m in move_list:
+        this_query.where.insert(0, this_query.where.pop(m))
 
     # perform selections
     for cond in this_query.where:
@@ -135,7 +205,6 @@ def optimizer(this_query):
 
 
 
-
     # perform projections   (be careful to check from_table names to see if they redirect to a JOIN result)
     projection_tables = {}      # map tables to column indices to save.  Dictionary of lists
     for proj in this_query.select_attr:         # aggregate projections to avoid issues
@@ -203,20 +272,11 @@ def optimizer(this_query):
         # determine index of desired attribute
         right_attr_index = this_query.from_tables[right_table][1][right_attr]
 
-
-        #
-        #   TODO handle natural joins --> determine shared attributes and pass them to join function as an equi join
-        #
-
-        #
-        #   TODO alter join function to signify if "ON" attributes are the same and should be merged or if are different and should be maintained (optional)
-        #
-
-
-
         # determine attribute index dictionary for the result of the join (currently if/else all contain same code.  May change if decide to handle outer joins differently)
         ty = join[0]
+        natural_list = []
         join_attr_dict = {}
+
         if ty == "equi":
             # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
             join_attr_dict = this_query.from_tables[left_table][1]
@@ -226,6 +286,25 @@ def optimizer(this_query):
                 if this_query.from_tables[right_table][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
                     attr_ind -= 1
                 join_attr_dict[k] = attr_ind
+        elif ty == "natural":
+            # determine attributes shared between tables to be natural joined
+            common_list = []
+            for a1 in TABLES[left_table].attribute_names:
+                for a2 in TABLES[right_table].attribute_names:
+                    if a1 == a2:    # common attribute found
+                        helper = (this_query.from_tables[left_table][a1], this_query.from_tables[right_table][a2])
+                        common_list.append(helper[1])   # record common attribute indices in the right table
+                        natural_list.append(helper)
+
+            # concatenate right attributes to left ones.  Drop common attributes from the right relation, as done by join function
+            join_attr_dict = this_query.from_tables[left_table][1]
+            attr_offset = TABLES[left_table].num_attributes + 1     # +1 since indexing starts at 0
+            counter = 1     # indexing for right table attributes start at 0.  Must +1 to the counter to avoid giving last attribute of left table and first of the right the same index
+            for k in this_query.from_tables[right_table][1]:
+                if this_query.from_tables[right_table][1][k] not in common_list:
+                    attr_ind = counter + attr_offset
+                    join_attr_dict[k] = attr_ind        # map string name to index location
+
         elif ty == "left":
             # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
             join_attr_dict = this_query.from_tables[left_table][1]
@@ -269,12 +348,18 @@ def optimizer(this_query):
         this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
 
 
+    #
+    #   TODO apply aggregate operators
+    #
 
-    # TODO based on relative sizes of relations, determine what type of join (sort vs. linear) --> need to update the join function (backend.py) to reflect these options
-    # TODO determine what joins to do first in the case of a multiple joins
-    # TODO check access paths
-    # TODO perform selections before projections (might remove an attribute needed for a selection during a projection)
-    # TODO perform most restrictive selections first
+
+
+
+
+
+
+
+
 
     # return resulting relation
     return relation
