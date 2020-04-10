@@ -14,6 +14,7 @@ import re
 # constants/global variables
 TABLES = {}     # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
 INDEX = {}      # map index name to table name.  Index stored in that table  (also in backend.py --> need to move to main)
+JOIN_MULT = 1.5   # value multiplied by number of tuples in a table to determine if join should be nested loop or sort/merge
 
 
 # standardized error function  --> should be in main driver program ... here temporarily
@@ -93,8 +94,8 @@ class Comparison:
         #   self.eval = False   # result of comparison.  May need this, will decide when writing backend for interpreting it
 
         # operations ...  (can include IN/BETWEEN later?)
-        self._and = False
-        self._or  = False
+        self.and_ = False
+        self.or_  = False
         self.equal = False
         self.not_equal = False
         self.greater = False
@@ -972,8 +973,17 @@ def parse_query(this_query, inp_line):
                                     else:
                                         error(" invalid table name in join ON clause.")
 
+                                # determine left table from the on clause.  On clause operand that does not match the right table name should contain the name of the left table of the join
+                                if left_on[0] == right_name:
+                                    left_name = right_on[0]
+                                elif right_on == right_name:
+                                    left_name = left_on[0]
+                                else:
+                                    error(" on clause does not reference the right table of the join.")
+                            else:
+                                left_name = this_query.joins[-1][2]     # take the right table name from the preceding join and use that as the left name for this join
+
                             # add join to this_query
-                            left_name = this_query.joins[-1][2]     # take the right table name from the preceding join and use that as the left name for this join
                             this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
 
             else:       # no joins in this section of FROM clause
@@ -1106,11 +1116,13 @@ def parse_where(this_query, where_clause):      # this_query included for table 
         and_list = re.split(" and ", where_clause)
         this_comparison.left_operand = parse_where(this_query, and_list[0])
         this_comparison.right_operand = parse_where(this_query, and_list[1])
+        this_comparison.and_ = True
 
     elif "or" in where_clause:
         or_list = re.split(" or ", where_clause)
         this_comparison.left_operand = parse_where(this_query, or_list[0])
         this_comparison.right_operand = parse_where(this_query, or_list[1])
+        this_comparison.or_ = True
 
     else:   # base case
         # break into operands
