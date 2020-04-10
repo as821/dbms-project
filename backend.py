@@ -827,6 +827,13 @@ def create_table(table_name, attr):
 # attr_index specifies the index of the attribute to be compared in the relation (which column number) --> avoid needing table knowledge here
 # if only trying to perform a one-table selection, only populate relation1, condition, and attr_index1. Leave rest null
 def selection(relation1, relation2, condition, attr_index1, attr_index2):
+
+
+
+    # TODO handle compound selections (conjunctive and disjunctive selections)
+
+
+
     return_relation = []
 
     # determine value to compare against
@@ -849,22 +856,22 @@ def selection(relation1, relation2, condition, attr_index1, attr_index2):
     # loop through relation and perform operation
     for instance in range(len(relation1)):
         if condition.equal:
-            if relation1[instance][attr_index] == value:
+            if relation1[instance][attr_index1] == value:
                 return_relation.append(relation1[instance])
         elif condition.not_equal:
-            if relation1[instance][attr_index] != value:
+            if relation1[instance][attr_index1] != value:
                 return_relation.append(relation1[instance])
         elif condition.greater:
-            if relation1[instance][attr_index] > value:
+            if relation1[instance][attr_index1] > value:
                 return_relation.append(relation1[instance])
         elif condition.less:
-            if relation1[instance][attr_index] < value:
+            if relation1[instance][attr_index1] < value:
                 return_relation.append(relation1[instance])
         elif condition.great_equal:
-            if relation1[instance][attr_index] >= value:
+            if relation1[instance][attr_index1] >= value:
                 return_relation.append(relation1[instance])
         elif condition.less_equal:
-            if relation1[instance][attr_index] <= value:
+            if relation1[instance][attr_index1] <= value:
                 return_relation.append(relation1[instance])
         else:
             error(" no operation specified in condition.")
@@ -882,7 +889,7 @@ def projection(relation, indexes):
     for instance in relation:
         tup = list()
         for i in indexes:
-            tup.append(instance[i])
+            tup.append(instance[i])     # TODO definitely a list function that does this faster
         return_relation.append(tup)
 
 
@@ -897,11 +904,22 @@ def projection(relation, indexes):
 # relation1 and relation2 are list of lists
 # attr1 and attr2 are attribute indexes (specified by ON clause)
 # typ refers to the type of join --> (equi, outer, left, right)  outer refers to full outer join.  Left and right are outer joins
-def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = None):
+def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
 
     #
     #   TODO add option for other type of join (currently always doing nested loop.  Want to support sort/merge too)
     #
+    if typ == "natural" and nested == False:
+        # cannot handle sort/merge natural joins on multiple common attributes
+        if len(natural_list) > 1:
+            # refactor as an equijoin
+            typ ="equi"
+            attr1 = natural_list[0][0]
+            attr2 = natural_list[0][1]
+
+        else:
+            # multiple join attributes --> revert to nested loop
+            nested = False
 
 
     return_relation = []
@@ -936,14 +954,11 @@ def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = No
 
                 # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
                 # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-                for i in inner_group:
-                    for o in outer_group:
-                        return_relation.append(i+o)     # TODO need to add code here to fix the merging of these attributes (so is in conjunction with attr dictionaries)
-
-
-
-
-
+                for r1 in outer_group:
+                    for r2 in inner_group:
+                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                        helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                        return_relation.append(helper)
     elif typ == "natural":
         if natural_list is not list:
             error("invalid natural_list in natural join")
@@ -964,7 +979,36 @@ def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = No
                         helper = r1.append(r2[r] for r in range(len(r2)) if r not in common_list)
                         return_relation.append(helper)
         else:
-            pass        # TODO ?? with multiple attributes will be hard.  Maybe just reroute those with one attribute in common to a sort/merge equijoin and only handle multi-attribute natural joins with nested loop
+            pass        # TODO ?? with multiple attributes will be hard. Reroute those with one attribute in common to a sort/merge equijoin and only handle multi-attribute natural joins with nested loop
+                        # issues with sorting on an unknown number of attributes
+
+            #     # sort left relation on join attribute
+    # relation1.sort(key=lambda x: (x[attr1]))
+    #
+    # # sort right relation
+    # relation2.sort(key=lambda x: (x[attr2]))
+    #
+    # # scan both tables for matches.  If match found, then add to return relation
+    # inner_index = 0       # let relation2 be the inner relation and relation1 be the outer relation
+    # outer_index = 0
+    # while inner_counter < len(relation2) and outer_counter < len(relation1):    # while still samples in both relations
+    #     key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
+    #     inner_group = []
+    #     while inner_index < len(relation2) and key == relation2[inner_index][attr2]:    # collects all samples with the given value
+    #         inner_group.append(relation2[inner_index])
+    #         inner_index += 1
+    #     outer_group = []
+    #     while outer_index < len(relation1) and key == relation1[outer_index][attr1]:    # collects all samples with the given value
+    #         outer_group.append(relation1[outer_index])
+    #         outer_index += 1
+    #
+    #     # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
+    #     # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
+    #     for r1 in outer_group:
+    #         for r2 in inner_group:
+    #             # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+    #             helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+    #             return_relation.append(helper)
 
     elif typ == "outer":    # full outer join
         if nested:
@@ -995,7 +1039,60 @@ def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = No
                         return_relation.append(left_helper)
                         return_relation.append(right_helper)
         else:
-            pass
+            # sort left relation on join attribute
+            relation1 = sorted(relation1, key=lambda x: x[attr1])
+
+            # sort right relation
+            relation2 = sorted(relation2, key=lambda x: x[attr2])
+
+            # scan both tables for matches.  If match found, then add to return relation
+            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
+            outer_index = 0
+            while inner_counter < len(relation2) and outer_counter < len(
+                    relation1):  # while still samples in both relations
+                key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
+                inner_group = []
+                while inner_index < len(relation2) and key == relation2[inner_index][attr2]:  # collects all samples with the given value
+                    inner_group.append(relation2[inner_index])
+                    inner_index += 1
+                outer_group = []
+                while outer_index < len(relation1) and key == relation1[outer_index][attr1]:  # collects all samples with the given value
+                    outer_group.append(relation1[outer_index])
+                    outer_index += 1
+
+                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
+                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
+                if len(outer_group) > 0 and len(inner_group) > 0:       # if both are non-empty
+                    for r1 in outer_group:
+                        for r2 in inner_group:
+                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                            helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                            return_relation.append(helper)
+                else:       # if one is empty, append contents of the other and pad with nulls
+                    for r1 in outer_group:
+                        left_helper = r1
+                        left_helper.append(None for r in range(len(relation2[0])-1) )   # -1 to account for shared attribute
+                        return_relation.append(left_helper)
+
+                    for r2 in inner_group:
+                        # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
+                        right_helper = []
+                        for i in range(len(relation1[0])):
+                            if i == attr1:
+                                right_helper.append(r2[attr2])
+                            else:
+                                right_helper.append(None)
+                        for i in range(len(r2)):
+                            if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
+                                right_helper.append(r2[i])
+
+                        # add both r1 and r2 to return relation
+                        return_relation.append(right_helper)
+
+
+
+
+
     elif typ == "left":     # left outer join
         if nested:
             for r1 in relation1:
@@ -1013,7 +1110,43 @@ def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = No
                         # add r1 (from left relation) to return relation
                         return_relation.append(left_helper)
         else:
-            pass
+            # sort left relation on join attribute
+            relation1 = sorted(relation1, key=lambda x: x[attr1])
+
+            # sort right relation
+            relation2 = sorted(relation2, key=lambda x: x[attr2])
+
+            # scan both tables for matches.  If match found, then add to return relation
+            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
+            outer_index = 0
+            while inner_counter < len(relation2) and outer_counter < len(
+                    relation1):  # while still samples in both relations
+                key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
+                inner_group = []
+                while inner_index < len(relation2) and key == relation2[inner_index][
+                    attr2]:  # collects all samples with the given value
+                    inner_group.append(relation2[inner_index])
+                    inner_index += 1
+                outer_group = []
+                while outer_index < len(relation1) and key == relation1[outer_index][
+                    attr1]:  # collects all samples with the given value
+                    outer_group.append(relation1[outer_index])
+                    outer_index += 1
+
+                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
+                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
+                if len(outer_group) > 0 and len(inner_group) > 0:  # if both are non-empty
+                    for r1 in outer_group:
+                        for r2 in inner_group:
+                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                            helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                            return_relation.append(helper)
+                else:  # if one is empty, append contents of the other and pad with nulls
+                    for r1 in outer_group:
+                        left_helper = r1
+                        left_helper.append(
+                            None for r in range(len(relation2[0]) - 1))  # -1 to account for shared attribute
+                        return_relation.append(left_helper)
     elif typ == "right":    # right outer join
         if nested:
             for r1 in relation1:
@@ -1037,7 +1170,52 @@ def join(relation1, relation2, attr1, attr2, typ, nested=True, natural_list = No
                         # add both r2 (right relation) to return relation
                         return_relation.append(right_helper)
         else:
-            pass
+            # sort left relation on join attribute
+            relation1 = sorted(relation1, key=lambda x: x[attr1])
+
+            # sort right relation
+            relation2 = sorted(relation2, key=lambda x: x[attr2])
+
+            # scan both tables for matches.  If match found, then add to return relation
+            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
+            outer_index = 0
+            while inner_counter < len(relation2) and outer_counter < len(
+                    relation1):  # while still samples in both relations
+                key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
+                inner_group = []
+                while inner_index < len(relation2) and key == relation2[inner_index][
+                    attr2]:  # collects all samples with the given value
+                    inner_group.append(relation2[inner_index])
+                    inner_index += 1
+                outer_group = []
+                while outer_index < len(relation1) and key == relation1[outer_index][
+                    attr1]:  # collects all samples with the given value
+                    outer_group.append(relation1[outer_index])
+                    outer_index += 1
+
+                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
+                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
+                if len(outer_group) > 0 and len(inner_group) > 0:  # if both are non-empty
+                    for r1 in outer_group:
+                        for r2 in inner_group:
+                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
+                            helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
+                            return_relation.append(helper)
+                else:  # if one is empty, append contents of the other and pad with nulls
+                    for r2 in inner_group:
+                        # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
+                        right_helper = []
+                        for i in range(len(relation1[0])):
+                            if i == attr1:
+                                right_helper.append(r2[attr2])
+                            else:
+                                right_helper.append(None)
+                        for i in range(len(r2)):
+                            if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
+                                right_helper.append(r2[i])
+
+                        # add both r1 and r2 to return relation
+                        return_relation.append(right_helper)
     else:
         error(" invalid join type specified")
 
