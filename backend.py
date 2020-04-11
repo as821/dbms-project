@@ -1167,6 +1167,38 @@ def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
 
 
 # DML insert operation
+#table_name = table to be inserted into
+#attri_name should have a corresponding attri_value that's inserted
+def insert(table_name, attri_names, attri_values):
+    # input validation
+    if table_name not in TABLES:
+        error("relations must exist to insert.")
+    if type(attri_names) is not list:
+        error("attribute must be a list.") 
+    if len(attri_names) != len(attri_values):
+        error("attribute_name must equal attribute_value")
+        
+    
+    #access table from global
+    table = TABLES[table_name]
+    
+    #create an empty list to populate with given values
+    obj_to_insert = [None] * len(table.attribute_names)
+    
+    #loops trhough given names and finds them in the table
+    #then adds them to obj_to_insert in the expected order
+    try:
+        counter = 0
+        for attri in attri_names:
+            correctIndex = table.attribute_names.index(attri)
+            obj_to_insert[correctIndex] = attri_values[counter]
+            counter += 1
+        
+    except ValueError:
+        error("In Insert: a given name did not match the table attribute_name.")    
+        
+    write(table, [obj_to_insert])
+#end of DML insert
 
 
 
