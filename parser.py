@@ -1,199 +1,15 @@
 #                                           #
-#   COSC 280 DBMS Project --> Parser code   #
+#   COSC 280 DBMS Project       parser.py   #
 #                                           #
 
 
 
-
-# import statements
-import re
+from definitions import *
 
 
 
 
-# constants/global variables
-TABLES = {}     # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
-INDEX = {}      # map index name to table name.  Index stored in that table  (also in backend.py --> need to move to main)
-JOIN_MULT = 1.5   # value multiplied by number of tuples in a table to determine if join should be nested loop or sort/merge
-
-
-# standardized error function  --> should be in main driver program ... here temporarily
-def error(st=" parsing error. Invalid syntax or input."):
-    print("\nERROR:", st)
-    # raise ValueError
-# END error
-
-
-
-
-
-# Class declaration/definitions
-# Table class   (not specific to parser.  Should be in main driver file)
-class Table:
-    def __init__(self):
-        self.name = ""
-        self.num_attributes = 0
-        self.num_tuples = 0
-        self.attribute_names = set()    # list of strings (for fast look up on table/attr validation)
-        self.attributes = []            # list of Attribute objects for this Table
-
-        self.primary_key = ""
-        self.foreign_key = tuple()      # Table, attribute
-# END Table class
-
-
-
-
-# Attribute class   (not specific to parser.  Should be in main driver file)
-class Attribute:
-    def __init__(self):
-        self.name = ""
-        self.table = object()   # reference to the table that this attribute is a part of
-        self.type = ""          # string containing the type of this attribute
-# END Attribute class
-
-
-
-
-# Query class
-class Query:
-    def __init__(self):
-        ### object attributes ###
-        self.select_attr = []       # give as tuple of (table name, attr name) --> only one table in from then table name can be ""
-        self.from_tables = {}       # use alias/table name as key --> maps to table name (simplifies parsing)
-        self.alias = set()          # need a record of what is an alias in from_tables --> set of strings (only for membership checks)
-        self.where = object()       # root to tree of Comparison objects.  object just a placeholder
-        self.num_tables = 0
-
-        ### add new flags/variables as needed here.  These flags will be interpreted by the backend ###
-        # handle compound (? unsure proper term) queries here
-        self.union = False
-        self.intersect = False
-        self.difference = False
-        self.left_query = object()   # Query reference
-        self.right_query = object()  # Query reference
-
-        # aggregate operators.  For each supported operator maintain a list of indices (of select attr list) to apply that operator to
-        self.max = []
-        self.min = []
-        self.avg = []
-
-        # handle joins
-        self.joins = []         # list of joins in the order they were found in the query. Tuple (join_type, table1, table2, left_on, right_on)
-# END Query class
-
-
-
-
-# Comparison class
-class Comparison:
-    def __init__(self):
-        # operands  (breaking comparisons into trees of comparisons allows for more complex+nested comparisons)
-        self.right_operand = object()   # using object base class should allow for placing either another Comparison() here or an integer or a string
-        self.left_operand = object()
-        #   self.eval = False   # result of comparison.  May need this, will decide when writing backend for interpreting it
-
-        # operations ...  (can include IN/BETWEEN later?)
-        self.and_ = False
-        self.or_  = False
-        self.equal = False
-        self.not_equal = False
-        self.greater = False
-        self.less = False
-        self.great_equal = False
-        self.less_equal = False
-
-        self.assignment = False     # only to be used in support of UPDATE DML command
-# END Comparison class
-
-
-
-
-
-# DML class
-class DML:
-    def __init__(self):
-        self.insert = False
-        self.delete = False
-        self.update = False
-        self.table_name = ""
-
-        # insert
-        self.values = []
-
-        # update
-        self.set = []   # empty list of Comparison objects.  Set assignment = True
-
-        # update and delete
-        self.where = object()   # placeholder until filled with a Comparison object by parser
-# END DML class
-
-
-
-
-
-# DDL class
-class DDL:
-    def __init__(self):
-        self.table = False      # set to false to signify INDEX  (initialized to a placeholder value)
-        self.create = False     # set to false to signify DROP
-
-        self.table_name = ""
-        self.index_name = ""
-        self.attr = []      # list of tuples of (attribute name, data type)
-        self.primary_key = ""
-        self.foreign_key = tuple()
-
-
-
-
-#           #
-#   TODO    #
-#           #
-#   test DML insert, update, delete parsing
-#   test DDL create/drop table/index
-
-#   support NULLs? --> have to add another value to the tuples in DDL.attr (boolean for NULL/NOT NULL)
-#   add support for GROUPBY/HAVING clauses in "query" section
-#   include IN/BETWEEN too?
-
-
-
-
-
-def parser_main():  # parameter
-    # TODO remove   debugging help
-    l = Table()
-    l.name = "tablea"
-    l.num_attributes = 3
-    l.attribute_names.add("emp#")
-    l.attribute_names.add("field2")
-    l.attribute_names.add("field3")
-    TABLES["tablea"] = l
-
-    l = Table()
-    l.name = "tableb"
-    l.num_attributes = 3
-    l.attribute_names.add("emp#")
-    l.attribute_names.add("field2")
-    l.attribute_names.add("field3")
-    TABLES["tableb"] = l
-
-    l = Table()
-    l.name = "tablec"
-    l.num_attributes = 3
-    l.attribute_names.add("emp#")
-    l.attribute_names.add("field2")
-    l.attribute_names.add("field3")
-    TABLES["tablec"] = l
-
-
-
-
-
-
-    # take a string as input (contains entire query)
-    inp_line = "SELECT a.emp#, b.field2, max(a.field3) FROM tableA as a LEFT OUTER JOIN tableB ON a.emp# = b.emp# WHERE a.field2 = 10"
+def parser_main(inp_line):  # parameter
     inp_line = inp_line.lower()
 
 
@@ -557,11 +373,6 @@ def parse_query(this_query, inp_line):
         # tokenize on ',' to separate table names
         from_list = from_clause.split(',')
         for name in from_list:
-            #
-            # TODO determine which join is used.  Check table name/column combination for ON part of join command
-            #       MUST support multiple joins (will likely be tested for the optimizer
-            #
-
             # tokenize on joins before can tokenize aliases
             # tokenize on JOIN (classify as NATURAL JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN, or INNER JOIN) --> validate contents of ON clause for join too
             if " join " in name:
@@ -1112,13 +923,13 @@ def parse_query(this_query, inp_line):
 def parse_where(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
     # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
     this_comparison = Comparison()
-    if "and" in where_clause:
+    if " and " in where_clause:
         and_list = re.split(" and ", where_clause)
         this_comparison.left_operand = parse_where(this_query, and_list[0])
         this_comparison.right_operand = parse_where(this_query, and_list[1])
         this_comparison.and_ = True
 
-    elif "or" in where_clause:
+    elif " or " in where_clause:
         or_list = re.split(" or ", where_clause)
         this_comparison.left_operand = parse_where(this_query, or_list[0])
         this_comparison.right_operand = parse_where(this_query, or_list[1])
@@ -1126,7 +937,8 @@ def parse_where(this_query, where_clause):      # this_query included for table 
 
     else:   # base case
         # break into operands
-        if "=" in where_clause:
+        this_comparison.leaf = True
+        if " =" in where_clause:
             op = "="
             this_comparison.equal = True
 
@@ -1144,11 +956,11 @@ def parse_where(this_query, where_clause):      # this_query included for table 
 
         elif "<" in where_clause:
             op = "<"
-            this_comparison.greater = True
+            this_comparison.less = True
 
         elif ">" in where_clause:
             op = ">"
-            this_comparison.less = True
+            this_comparison.greater = True
 
         else:
             error(" no recognized operation used in the WHERE clause")
@@ -1178,27 +990,29 @@ def parse_where(this_query, where_clause):      # this_query included for table 
                             helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
                         else:
                             error(" valid table name, invalid attribute in WHERE clause")
-                            pass
                     else:
                         error(" invalid table name in WHERE clause")
-                        pass
-
-                elif this_query.num_tables ==  1:  # no table specified ( >1 table in query )
-                    # only one table is used in the query, so no table specification needed
-                    # only on table in from, dont need to specify table
-                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
-
-                    # validate operand_list[operand] is in this_query.from_tables[table_key] table
-                    if operand_list[operand] in TABLES[this_query.from_tables[table_key]].attribute_names:
-                         helper = (this_query.from_tables[table_key], operand_list[operand])
-                    else:
-                        error(" valid table name, invalid attribute in WHERE clause")
-                        pass
 
                 else:
-                    error(" ambiguous which table attribute is from in the WHERE clause. >1 table in querey, must specify where the attribute comes from")
-                    pass
+                    quote_list = operand_list[operand].split("\"")
+                    if len(quote_list) > 1:     # no table specified --> may be a string for a comparison
+                        if len(quote_list) == 3:
+                            helper = operand_list[1]
+                        else:
+                            error(" syntax error with \"...\" in WHERE clause.")
 
+                    elif this_query.num_tables ==  1:  # no table specified ( >1 table in query )
+                        # only one table is used in the query, so no table specification needed
+                        # only on table in from, dont need to specify table
+                        table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+
+                        # validate operand_list[operand] is in this_query.from_tables[table_key] table
+                        if operand_list[operand] in TABLES[this_query.from_tables[table_key]].attribute_names:
+                             helper = (this_query.from_tables[table_key], operand_list[operand])
+                        else:
+                            error(" valid table name, invalid attribute in WHERE clause")
+                    else:
+                        error(" ambiguous which table attribute is from in the WHERE clause. >1 table in querey, must specify where the attribute comes from")
 
             # complete the Comparison object
             if operand == 0:
@@ -1211,12 +1025,3 @@ def parse_where(this_query, where_clause):      # this_query included for table 
         # TODO need to add support for aggregate operators and parenthesis
     return this_comparison
 # END parse_where
-
-
-
-
-
-
-
-
-parser_main()
