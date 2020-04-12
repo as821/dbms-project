@@ -9,7 +9,7 @@
 
 
 from definitions import *
-from backend import access, selection, projection, join
+from backend import access, selection, projection, join, union, difference, intersection
 
 
 
@@ -318,7 +318,7 @@ def optimizer(this_query):
         if table in this_query.alias:
             table = tables_to_include[tab] = this_query.from_tables[table]
         if type(this_query.from_tables[table]) == str:
-            table = tables_to_include[tab] = this_query.from_tables[table]
+            tables_to_include[tab] = this_query.from_tables[table]
     tables_to_output = list(set(tables_to_include))
 
     for ta in range(len(tables_to_output)):
@@ -345,7 +345,7 @@ def optimizer(this_query):
 
 
 
-# where_evaluate
+# where_evaluate        as of now --> only applies results to tables when ret = False (should only occur for top-level function call)
 def where_evaluate(this_query, cond, ret=False):
     if type(cond.left_operand) is tuple:
         if type(cond.right_operand) is tuple:  # essentially an equi-join
@@ -412,10 +412,11 @@ def where_evaluate(this_query, cond, ret=False):
 
             # call selection function
             dic = this_query.from_tables[table][1]
-            this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
 
             if ret:
                 return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
+            else:
+                this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
 
     elif type(cond.right_operand) is tuple:
         # determine table
@@ -430,33 +431,39 @@ def where_evaluate(this_query, cond, ret=False):
 
         # call selection function
         dic = this_query.from_tables[table][1]
-        this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
         if ret:
             return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
+        else:
+            this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
     elif cond.and_ or cond.or_:  # compound query
         result_relation = []
         attr_dict = {}
         if cond.and_:
             left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
             right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
-            # TODO call intersect function here  (store in result_relation and attr_dict)
+            if left_dict == right_dict:
+                result_relation = intersection(left, right)
+                attr_dict = left_dict
+            else:
+                error("dictionaries do not match.  Cannot perform intersection operation.")
         else:   # cond._or
             left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
             right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
-            # TODO call union function here     (store in result_relation and attr_dict)
-
-        if left_dict != right_dict:
-            error("")
+            if left_dict == right_dict:
+                result_relation = union(left, right)
+                attr_dict = left_dict
+            else:
+                error("dictionaries do not match. Cannot perform union operation.")
 
         # apply results to affected tables
-        total_affected = affected_left.extend(affected_right)
-        for table in total_affected:
-            if this_query.from_tables[table] is str:    # essentially, if table was used in a join.  No aliases should make it to here
-                table = this_query.from_tables[table]
-            this_query.from_tables[table] = (result_relation, attr_dict)
-
+        total_affected = list(set(affected_left + affected_right))   # combine lists and remove duplicates
         if ret:
             return result_relation, left_dict, total_affected
+        else:
+            for table in total_affected:
+                if this_query.from_tables[table] is str:  # essentially, if table was used in a join.  No aliases should make it to here
+                    table = this_query.from_tables[table]
+                this_query.from_tables[table] = (result_relation, attr_dict)
     else:
         error(" no valid comparison does not use at least one table attribute.")
 # END where_evaluate
