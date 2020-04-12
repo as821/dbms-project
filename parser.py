@@ -923,18 +923,89 @@ def parse_query(this_query, inp_line):
 def parse_where(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
     # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
     this_comparison = Comparison()
-    if " and " in where_clause:
-        and_list = re.split(" and ", where_clause)
-        this_comparison.left_operand = parse_where(this_query, and_list[0])
-        this_comparison.right_operand = parse_where(this_query, and_list[1])
-        this_comparison.and_ = True
+    if " and " in where_clause or " or " in where_clause:
+        close_list = where_clause.split(")")
+        close_list = [c for c in close_list if c != ""]
+        remove_list = []
+        counter = 0
+        for c in range(len(close_list)):
+            num_open = close_list[c].count("(")
+            if num_open > 1:
+                counter += 1
 
-    elif " or " in where_clause:
-        or_list = re.split(" or ", where_clause)
-        this_comparison.left_operand = parse_where(this_query, or_list[0])
-        this_comparison.right_operand = parse_where(this_query, or_list[1])
-        this_comparison.or_ = True
+                # compound condition.  Combine and recursive call
+                num_open -= 1
+                for i in range(num_open):
+                    remove_list.append(c + i + 1)
+        if counter > 0:
+            count = 0
+            for r in remove_list:
+                close_list.pop(r - count)
+                count += 1
 
+            # fix regular expression to avoid errors
+            helper_list = close_list[1].split("(")
+            if len(helper_list) > 1:
+                for i in range(1, len(helper_list)):
+                    if i != 0:
+                        helper_list[i] = "\(" + helper_list[i]
+                fixed_string = ''
+                for i in helper_list:
+                    fixed_string += i
+                close_list[1] = fixed_string
+
+
+
+            # have narrowed close_list down to only top level operators.  take one at a time (lower levels of recursion will handle the rest)
+            useful_list = re.split(close_list[1], where_clause)
+            useful_list[1] = close_list[1] + useful_list[1]
+            useful_list[1] = useful_list[1].replace("\\", "")
+
+            # determine operation to perform
+            open_list = useful_list[1].split("(", maxsplit=1)
+            useful_list[1] = "(" + open_list[1]
+
+
+            if " or " in open_list[0]:
+                # clean outer parenthesis
+                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
+                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
+                zero_ind = useful_list[0].rfind(")")
+                useful_list[0] = useful_list[0][:zero_ind]
+                one_ind = useful_list[1].rfind(")")
+                useful_list[1] = useful_list[1][:one_ind]
+
+                # recursive calls
+                this_comparison.left_operand = parse_where(this_query, useful_list[0])
+                this_comparison.right_operand = parse_where(this_query, useful_list[1])
+                this_comparison.or_ = True
+            elif " and " in open_list[0]:
+                # clean outer parenthesis
+                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
+                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
+                zero_ind = useful_list[0].rfind(")")
+                useful_list[0] = useful_list[0][:zero_ind]
+                one_ind = useful_list[1].rfind(")")
+                useful_list[1] = useful_list[1][:one_ind]
+
+                # recursive calls
+                this_comparison.left_operand = parse_where(this_query, useful_list[0])
+                this_comparison.right_operand = parse_where(this_query, useful_list[1])
+                this_comparison.and_ = True
+            else:
+                error("invalid syntax in where clause")
+        else:
+            if " and " in where_clause:
+                and_list = re.split(" and ", where_clause, maxsplit=1)
+                this_comparison.left_operand = parse_where(this_query, and_list[0])
+                this_comparison.right_operand = parse_where(this_query, and_list[1])
+                this_comparison.and_ = True
+
+            elif " or " in where_clause:
+                or_list = re.split(" or ", where_clause, maxsplit=1)
+                this_comparison.left_operand = parse_where(this_query, or_list[0])
+                this_comparison.right_operand = parse_where(this_query, or_list[1])
+                this_comparison.or_ = True
     else:   # base case
         # break into operands
         this_comparison.leaf = True
@@ -997,7 +1068,7 @@ def parse_where(this_query, where_clause):      # this_query included for table 
                     quote_list = operand_list[operand].split("\"")
                     if len(quote_list) > 1:     # no table specified --> may be a string for a comparison
                         if len(quote_list) == 3:
-                            helper = operand_list[1]
+                            helper = quote_list[1].lstrip().rstrip()
                         else:
                             error(" syntax error with \"...\" in WHERE clause.")
 
