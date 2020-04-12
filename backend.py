@@ -899,35 +899,6 @@ def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
 
                     # add both r2 (right relation) to return relation
                     return_relation.append(right_helper)
-
-
-
-
-
-
-
-
-
-                    # else:
-                    #     # r1 --> pad back with nulls for the number of attributes in r2-1 (account for shared attribute)
-                    #     left_helper = r1
-                    #     for i in range(len(r2)-1):  # -1 to account for shared attribute
-                    #         left_helper.append(None)
-                    #
-                    #     # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
-                    #     right_helper = []
-                    #     for i in range(len(r1)):
-                    #         if i == attr1:
-                    #             right_helper.append(r2[attr2])
-                    #         else:
-                    #             right_helper.append(None)
-                    #     for i in range(len(r2)):
-                    #         if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
-                    #             right_helper.append(r2[i])
-                    #
-                    #     # add both r1 and r2 to return relation
-                    #     return_relation.append(left_helper)
-                    #     return_relation.append(right_helper)
         else:
             # sort left relation on join attribute
             relation1 = sorted(relation1, key=lambda x: x[attr1])
@@ -1159,6 +1130,17 @@ def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
 
 
 # set operations (given 2 relations, find difference, intersect, or union --> individual function for each)
+# union function
+def union(relation1, relation2):
+    relation = relation1 + relation2
+    relation.sort()
+    return [k for k,_ in itertools.groupby(relation)]
+
+def intersection(relation1, relation2):
+    return [rel for rel in relation1 if rel in relation2]
+
+def difference(relation1, relation2):
+    return [tup for tup in relation1+relation2 if tup not in relation1 or tup not in relation2]
 
 
 
@@ -1232,11 +1214,11 @@ def task_manager(query):
 
 
     # write to tables
-    inp = [["Andrew", 21, 1999], ["Bob", 83, 1800], ["Daniel", 34, 1500]]
+    inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
     write(table1, inp)
 
     # table 2
-    inp2 = [["Andrew", 400, "New York"], ["Bob", 350, "DC"], ["Joe", 200, "Seattle"]]
+    inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
     write(table2, inp2)
 
 
