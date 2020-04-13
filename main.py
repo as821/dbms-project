@@ -6,7 +6,7 @@
 
 # import statements
 from definitions import *
-from backend import access, create_index, delete_index, create_table, selection, projection, join, task_manager
+from backend import access, create_index, delete_index, create_table, drop_table, selection, projection, join, task_manager
 from parser import parser_main
 from optimizer import optimizer
 
@@ -15,22 +15,19 @@ from optimizer import optimizer
 #           #
 #   TODO    #
 #           #
+#   (parser.py)             test DML parsing (insert, update, delete)
+#   (backend.py)            implement DML mid level functions and aggregate operators
+#   (backend.py/main.py)    implement relational integrity (pick a default policy CASCADE/NULL).  Update referenced table in create table (main) and deleting from referenced table (remove and drop table)
+#   (optimizer.py)          add support for aggregate operators
+#   (main.py)               write input loop
+#   (main.py)               handle DML objects
 
-#   (optimizer.py)  add primary key check and perform any simple selections (see except ValueError part of where_access)
 
-#   (optimizer.py)  test optimizer
-#   (parser.py)     test DDL, DML parsing (insert, update, delete, create/drop table/index)
-
-#   (backend.py)    implement DML mid level functions, set operations, and aggregate operators, and DDL drop table
-#   (backend.py)    handle foreign key dependencies in mid/low level functions
-#   (main.py)       write input loop
-#   (main.py)       output resulting relation
-#   (main.py)       handle DDL/DML objects
-#   (optimizer.py)  add support for aggregate operators
-#   (optimizer.py)  support SELECT * (handled in projections section)
-#   (optimizer.py)  handle conjunctive/disjunctive selections (only need set union/intersection functions)
-
+#   *** Features to add ***
 #   GROUPBY/HAVING
+#   NOW (time logging function)
+#   EXPLAIN (outputs information about optimizer decisions)
+#   Support multiple foreign keys for each table
 
 
 
@@ -40,7 +37,7 @@ def main():
 
     # TODO testing
     table1 = create_table("test1_rel", [("name", "string"), ("age", "int"), ("year", "int")])
-    table2 = create_table("test2_rel", [("name", "string", ("income", "int"), ("home_town", "string"))])
+    table2 = create_table("test2_rel", [("name", "string"), ("income", "int"), ("home_town", "string")])
 
 
 
@@ -48,7 +45,10 @@ def main():
 
 
     # take a string as input (contains entire query)
-    inp_line = "SELECT name FROM test1_rel as a WHERE (a.age <= 50) and (a.name = \"Andrew\")"  # and (a.name = \"Andrew\")"
+    inp_line = "drop table test1_rel"
+
+    #   "create table test3_rel (name string, school_year string, hourly_salary int, primary key(name), foreign key (school_year) references test1_rel(year))"
+    #   "SELECT name FROM test1_rel as a WHERE (((a.age <= 50) and (a.name = \"Andrew\")) or (a.year < 2000)) or ((a.year > 1400) or (a.name = \"Bob\"))"
 
 
 
@@ -58,21 +58,19 @@ def main():
 
 
 
-    # # TODO testing section
-    task_manager(parsed_obj)        # just writes a few tuples to each of the tables to make query testing better
-
-
-
-
-
-
-
+    # TODO testing section
+    task_manager(parsed_obj)  # just writes a few tuples to each of the tables to make query testing better
+    create_index(TABLES["test1_rel"], "ind1", "name")
     # TODO END testing section
 
 
 
 
     if type(parsed_obj) is Query:
+
+
+
+
         # call optimizer on query output from the parser
         resulting_relation = optimizer(parsed_obj)
 
@@ -81,13 +79,22 @@ def main():
 
 
 
-
-
     # call appropriate DDL/DML command
     elif type(parsed_obj) is DML:
         pass
-    else:
-        pass
+    else:   # DDL
+        if parsed_obj.create:
+            if parsed_obj.table:
+                create_table(parsed_obj.table_name, parsed_obj.attr)
+                TABLES[parsed_obj.table_name].primary_key = parsed_obj.primary_key
+                TABLES[parsed_obj.table_name].foreign_key = parsed_obj.foreign_key      # TODO should be doing more set up here (modifying table referenced from to show that it is referenced by this new table --> for relational integrity)
+            else:
+                create_index(TABLES[parsed_obj.table_name], parsed_obj.index_name, parsed_obj.attr[0])
+        else:   # drop
+            if parsed_obj.table:
+                drop_table(TABLES[parsed_obj.table_name])
+            else:
+                delete_index(TABLES[INDEX[parsed_obj.index_name]], parsed_obj.index_name)
 # END main
 
 
