@@ -858,18 +858,14 @@ def parse_query(this_query, inp_line):
                     attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
                 elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
                     error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                    pass
                 else:
                     # only one table in from, dont need to specify table
-                    table_key = list(this_query.from_tables.keys())[
-                        0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
+                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
                     attr_tup = (this_query.from_tables[table_key], attr_name)
 
                 # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
                 if attr_tup[0] in TABLES:
-                    if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
-                        this_query.select_attr.append(attr_tup)
-                    else:
+                    if attr_tup[1] not in TABLES[attr_tup[0]].attribute_names:
                         error(" valid table name.  Invalid attribute in SELECT clause")
                 else:
                     error(" invalid table used in SELECT clause")
@@ -879,16 +875,28 @@ def parse_query(this_query, inp_line):
                     error(" invalid aggregate operator syntax")
                 else:
                     # identify any aggregate operators on select attributes
+                    add_on = ""
                     if " min(" in select_list[attr]:
                         this_query.min.append(attr_tup)     # need to store table name and attribute for later calculations
+                        add_on = "min"
                     elif " max(" in select_list[attr]:
                         this_query.max.append(attr_tup)
+                        add_on = "max"
                     elif " avg(" in select_list[attr]:
                         this_query.avg.append(attr_tup)
+                        add_on = "avg"
                     elif " count(" in select_list[attr]:    # any aggregate operators we are not going to support
+                        this_query.count.append(attr_tup)
+                        add_on = "count"
+                    elif " sum(" in select_list[attr]:
+                        this_query.sum.append(attr_tup)
+                        add_on = "sum"
+                    else:
                         error(" invalid aggregate operator included in SELECT.")
 
-
+                    # add additioanl field for the type of aggregate operator (makes optimizer code much faster)
+                    attr_tup = (attr_tup[0], attr_tup[1], add_on)
+                this_query.select_attr.append(attr_tup)     # store attribute
             else:
                 attr_name = select_list[attr].lstrip().rstrip()  # no aggregate operator, so just strip whitespace
 
