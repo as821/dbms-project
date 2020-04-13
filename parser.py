@@ -112,11 +112,10 @@ def parser_main(inp_line):  # parameter
             se = re.split(" where ", l[1])
             if len(se) == 2:    # where clause found
                 set_values = se[0].split(",")
-                dml_obj.where = parse_where(this_query, se[1])
+                dml_obj.where = parse_where_dml(dml_obj, se[1])
 
             elif len(se) == 1:  # no where clause included
-                set_values = se.split(",")
-
+                set_values = se[0].split(",")
             else:
                 error(" invalid update syntax")
 
@@ -133,12 +132,11 @@ def parser_main(inp_line):  # parameter
                 # determine data types of operands and clear of whitespace
                 left = operands[0].lstrip().rstrip()
                 if left.isdigit():
-                    if len(left.split(".")) == 2:
-                        this_comp.left_operand = float(left)
-                    else:
-                        this_comp.left_operand = int(left)
+                    error(" attribute being assigned must be on the left side")
                 else:
                     this_comp.left_operand = left
+                    if left not in TABLES[table_name].attribute_names:
+                        error(" cannot update a non-existent attribute.")
 
                 right = operands[1].lstrip().rstrip()
                 if right.isdigit():
@@ -159,7 +157,7 @@ def parser_main(inp_line):  # parameter
             # break into table name and WHERE condition (and parse where condition if it exists
             del_list = re.split(" where ", inp_line)
             if len(del_list) == 2:  # where clause found
-                dml_obj.where = parse_where(this_query, del_list[1])
+                dml_obj.where = parse_where_dml(dml_obj, del_list[1])
             elif len(del_list) != 1:
                 error(" too many WHERE clauses in delete")
 
@@ -1119,3 +1117,191 @@ def parse_where(this_query, where_clause):      # this_query included for table 
         # TODO need to add support for aggregate operators and parenthesis
     return this_comparison
 # END parse_where
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# parse_where
+def parse_where_dml(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
+    # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
+    this_comparison = Comparison()
+    if " and " in where_clause or " or " in where_clause:
+        close_list = where_clause.split(")")
+        close_list = [c for c in close_list if c != ""]
+        remove_list = []
+        counter = 0
+        for c in range(len(close_list)):
+            num_open = close_list[c].count("(")
+            if num_open > 1:
+                counter += 1
+
+                # compound condition.  Combine and recursive call
+                num_open -= 1
+                for i in range(num_open):
+                    remove_list.append(c + i + 1)
+        if counter > 0:
+            count = 0
+            for r in remove_list:
+                close_list.pop(r - count)
+                count += 1
+
+            # fix regular expression to avoid errors
+            helper_list = close_list[1].split("(")
+            if len(helper_list) > 1:
+                for i in range(1, len(helper_list)):
+                    if i != 0:
+                        helper_list[i] = "\(" + helper_list[i]
+                fixed_string = ''
+                for i in helper_list:
+                    fixed_string += i
+                close_list[1] = fixed_string
+
+
+
+            # have narrowed close_list down to only top level operators.  take one at a time (lower levels of recursion will handle the rest)
+            useful_list = re.split(close_list[1], where_clause)
+            useful_list[1] = close_list[1] + useful_list[1]
+            useful_list[1] = useful_list[1].replace("\\", "")
+
+            # determine operation to perform
+            open_list = useful_list[1].split("(", maxsplit=1)
+            useful_list[1] = "(" + open_list[1]
+
+
+            if " or " in open_list[0]:
+                # clean outer parenthesis
+                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
+                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
+                zero_ind = useful_list[0].rfind(")")
+                useful_list[0] = useful_list[0][:zero_ind]
+                one_ind = useful_list[1].rfind(")")
+                useful_list[1] = useful_list[1][:one_ind]
+
+                # recursive calls
+                this_comparison.left_operand = parse_where(this_query, useful_list[0])
+                this_comparison.right_operand = parse_where(this_query, useful_list[1])
+                this_comparison.or_ = True
+            elif " and " in open_list[0]:
+                # clean outer parenthesis
+                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
+                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
+                zero_ind = useful_list[0].rfind(")")
+                useful_list[0] = useful_list[0][:zero_ind]
+                one_ind = useful_list[1].rfind(")")
+                useful_list[1] = useful_list[1][:one_ind]
+
+                # recursive calls
+                this_comparison.left_operand = parse_where(this_query, useful_list[0])
+                this_comparison.right_operand = parse_where(this_query, useful_list[1])
+                this_comparison.and_ = True
+            else:
+                error("invalid syntax in where clause")
+        else:
+            if " and " in where_clause:
+                and_list = re.split(" and ", where_clause, maxsplit=1)
+                this_comparison.left_operand = parse_where(this_query, and_list[0])
+                this_comparison.right_operand = parse_where(this_query, and_list[1])
+                this_comparison.and_ = True
+
+            elif " or " in where_clause:
+                or_list = re.split(" or ", where_clause, maxsplit=1)
+                this_comparison.left_operand = parse_where(this_query, or_list[0])
+                this_comparison.right_operand = parse_where(this_query, or_list[1])
+                this_comparison.or_ = True
+    else:   # base case
+        # break into operands
+        this_comparison.leaf = True
+        if " =" in where_clause:
+            op = "="
+            this_comparison.equal = True
+
+        elif "!=" in where_clause:
+            op = "!="
+            this_comparison.not_equal = True
+
+        elif ">=" in where_clause:
+            op = ">="
+            this_comparison.great_equal = True
+
+        elif "<=" in where_clause:
+            op = "<="
+            this_comparison.less_equal = True
+
+        elif "<" in where_clause:
+            op = "<"
+            this_comparison.less = True
+
+        elif ">" in where_clause:
+            op = ">"
+            this_comparison.greater = True
+
+        else:
+            error(" no recognized operation used in the WHERE clause")
+            pass
+
+        operand_list = re.split(op, where_clause)   # split clause on whichever operation is found first
+        for o in range(len(operand_list)):      # clean operands before processing
+            operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
+
+
+        for operand in range(len(operand_list)):
+            # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
+            if operand_list[operand].isdigit():     # if this operand is a number
+                if '.' in operand_list[operand]:
+                    helper = float(operand_list[operand])
+                else:
+                    helper = int(operand_list[operand])
+            else:   # operand is a name of something (not a number)
+                attr_list = operand_list[operand].split(".")  # split to find if alias used
+                if operand_list[operand].lstrip().rstrip().isdigit():
+                    if len(attr_list) > 1:
+                        helper = float(operand_list[operand])
+                    else:
+                        helper = int(operand_list[operand])
+                elif len(attr_list) > 1:  # if a table name is specified
+
+                    # validate attr_list here
+                    if attr_list[0] in TABLES:
+                        if attr_list[1] in TABLES[attr_list[0]].attribute_names:
+                            helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
+                        else:
+                            error(" valid table name, invalid attribute in WHERE clause")
+                    else:
+                        error(" invalid table name in WHERE clause")
+
+                else:
+                    quote_list = operand_list[operand].split("\"")
+                    if len(quote_list) > 1:
+                        if len(quote_list) == 3:
+                            helper = quote_list[1].lstrip().rstrip()
+                        else:
+                            error(" syntax error with \"...\" in WHERE clause.")
+                    else:
+                        error(" unrecognized input in WHERE clause.")
+
+
+
+            # complete the Comparison object
+            if operand == 0:
+                this_comparison.left_operand = helper
+            else:
+                this_comparison.right_operand = helper
+
+
+
+        # TODO need to add support for aggregate operators and parenthesis
+    return this_comparison
+# END parse_where_dml
