@@ -190,12 +190,12 @@ def parser_main(inp_line):  # parameter
             ddl_obj.table = True
 
             # break up input
-            create_list = inp_line.split("(")
+            create_list = inp_line.split("(", maxsplit=1)
             if len(create_list) != 2:
                 error(" invalid create table syntax.")
 
             # determine table name and verify no table exist with the same name
-            t_name = re.split("reate table ", create_list[0])   # exclude c in create to get 2 vs always 1 --> identify errors
+            t_name = re.split("create table ", create_list[0])
             if len(t_name) != 2:
                 error(" invalid create table syntax.  No table name supplied.")
 
@@ -206,8 +206,8 @@ def parser_main(inp_line):  # parameter
             ddl_obj.table_name = table_name
 
             # get list of attributes (tokenize by ','.  Record as tuples of (name, datatype))
-            remove_paren = create_list[1].split(')')    # ) should be at very end, so this should only result in one partition
-            attr_list = remove_paren[0].split(",")
+            attr_list = create_list[1].split(",")
+            attr_list[-1] = attr_list[-1][:len(attr_list[-1]) - len(")")]       # strip only the final ")" from input
             for attr in attr_list:  # for each attribute in list, split into name and data type
                 if "primary key" in attr:
                     # take the value between the parenthesis and save as primary key
@@ -240,19 +240,20 @@ def parser_main(inp_line):  # parameter
 
                     if for_attr not in TABLES[for_table].attribute_names:
                         error(" cannot have foreign key reference a nonexistent attribute (existing table).")
-                    ddl_obj.foreign_key = (for_table, for_attr)
 
                     # validate key attribute
                     found = False
                     for a in ddl_obj.attr:
                         if a[0] == key_attr:
                             found = True
-                            ddl_obj.primary_key = key_attr
                             break
                     if not found:
                         error(" foreign key attribute does not exist in this relation.")
+
+                    # save result
+                    ddl_obj.foreign_key = (key_attr, for_table, for_attr)
                 else:
-                    l = attr.split(" ")
+                    l = attr.split()
                     if len(l) != 2:
                         error(" missing data type")
                     ddl_obj.attr.append((l[0].lstrip().rstrip(), l[1].lstrip().rstrip()))   # append tuple (attr, dtype)
@@ -301,7 +302,7 @@ def parser_main(inp_line):  # parameter
             # validate table name
             if table_name not in TABLES:
                 error(" cannot create an index on a nonexistent table.")
-            elif attr_name not in TABLES[table_name].attribute_name:
+            elif attr_name not in TABLES[table_name].attribute_names:
                 error(" cannot create an index on an attribute that does not exist in the given table.")
 
             # else, set valid table and attribute names
@@ -365,6 +366,8 @@ def parse_query(this_query, inp_line):
         select_start = inp_line.find("select") + len("select")
         select_end = inp_line.find("from")
         from_end = inp_line.find("where")
+        if from_end == -1:
+            from_end = len(inp_line) + 1
         select_clause = inp_line[select_start: select_end]
         from_clause = inp_line[(select_end + len("from")): from_end]
         where_clause = inp_line[(from_end + len("where")):]
@@ -385,20 +388,24 @@ def parse_query(this_query, inp_line):
                     # determine join type
                     join_type = ""
                     left_side = ""
+                    left_on = ()
+                    right_on = ()
                     on_clause = False
                     if " natural" in joins[0]:
                         join_type = "natural"
+                        left_on = None
+                        right_on = None
                         left_side = re.split(" natural", joins[0])[0]
                     elif " outer" in joins[0]:
                         if " left " in joins[0]:
-                            join_type = "left_outer"
+                            join_type = "left"
                             left_side = re.split(" left outer", joins[0])[0]
                         elif " right " in joins[0]:
-                            join_type = "right_outer"
+                            join_type = "right"
                             left_side = re.split(" right outer", joins[0])[0]
                         else:
-                            join_type = " full outer"
-                            left_side = re.split(" outer", joins[0])[0]
+                            join_type = "full"
+                            left_side = re.split(" full outer", joins[0])[0]
                         on_clause = True
                     else:
                         error(" unrecognized join type.  Must be NATURAL, LEFT/RIGHT/FULL OUTER.")
@@ -406,8 +413,6 @@ def parse_query(this_query, inp_line):
 
                     # split off ON clause (if exists)
                     right_side = joins[1]
-                    left_on = ()
-                    right_on = ()
                     if on_clause:
                         # break clause up into operands --> validate at end of iteration to allow for the use of aliases
                         clause = re.split(" on ", joins[1])
@@ -455,12 +460,12 @@ def parse_query(this_query, inp_line):
                     else:
                         # no alias found, just insert to query from_table
                         # strip whitespace from ends
-                        name = name.rstrip().lstrip()
+                        left_side = left_side.rstrip().lstrip()
 
                         # validate table name
-                        if name in TABLES:
-                            this_query.from_tables[name] = name
-                            left_name = name
+                        if left_side in TABLES:
+                            this_query.from_tables[left_side] = left_side
+                            left_name = left_side
                         else:
                             error("nonexistent table used in FROM clause")
 
@@ -485,12 +490,12 @@ def parse_query(this_query, inp_line):
                     else:
                         # no alias found, just insert to query from_table
                         # strip whitespace from ends
-                        name = name.rstrip().lstrip()
+                        right_side = right_side.rstrip().lstrip()
 
                         # validate table name
-                        if name in TABLES:
-                            this_query.from_tables[name] = name
-                            right_name = name
+                        if right_side in TABLES:
+                            this_query.from_tables[right_side] = right_side
+                            right_name = right_side
                         else:
                             error("nonexistent table used in FROM clause")
 
@@ -502,6 +507,8 @@ def parse_query(this_query, inp_line):
                                 error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
                         else:
                             # table specified, validate
+                            if left_on[0] in this_query.alias:
+                                left_on = (this_query.from_tables[left_on[0]], left_on[1])
                             if left_on[0] in TABLES:
                                 if left_on[1] not in TABLES[left_on[0]].attribute_names:
                                     error(" nonexistent attribute name in join ON clause.  Valid table name.")
@@ -514,6 +521,8 @@ def parse_query(this_query, inp_line):
                                 error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
                         else:
                             # table specified, validate
+                            if right_on[0] in this_query.alias:
+                                right_on = (this_query.from_tables[right_on[0]], right_on[1])
                             if right_on[0] in TABLES:
                                 if right_on[1] not in TABLES[right_on[0]].attribute_names:
                                     error(" nonexistent attribute name in join ON clause.  Valid table name.")
@@ -521,7 +530,10 @@ def parse_query(this_query, inp_line):
                                 error(" invalid table name in join ON clause.")
 
                     # add join to this_query
-                    this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
+                    if right_on is None or left_on is None:
+                        this_query.joins.append((join_type, left_name, right_name, None, None))
+                    else:
+                        this_query.joins.append((join_type, left_name, right_name, left_on[1], right_on[1]))
 
                 else:
                     # know there are multiple joins --> know what type of joins to perform.  Split on join so specifier is in the preceding partition
@@ -551,19 +563,21 @@ def parse_query(this_query, inp_line):
                     for i in range(len(joins)):
                         if i < 2:
                             if i == 0:
-                                # parse both left and right sides
+                                # split off ON clause (if exists)
+                                left_on = ()
+                                right_on = ()
 
                                 on_clause = True
                                 join_type = join_types[0]
                                 if join_type == "natural":
                                     on_clause = False
+                                    left_on = None
+                                    right_on = None
 
                                 left_side = joins[0]
                                 right_side = joins[1]
 
-                                # split off ON clause (if exists)
-                                left_on = ()
-                                right_on = ()
+
                                 if on_clause:
                                     # break clause up into operands --> validate at end of iteration to allow for the use of aliases
                                     clause = re.split(" on ", right_side)
@@ -610,12 +624,12 @@ def parse_query(this_query, inp_line):
                                 else:
                                     # no alias found, just insert to query from_table
                                     # strip whitespace from ends
-                                    name = name.rstrip().lstrip()
+                                    left_side = left_side.rstrip().lstrip()
 
                                     # validate table name
-                                    if name in TABLES:
-                                        this_query.from_tables[name] = name
-                                        left_name = name
+                                    if left_side in TABLES:
+                                        this_query.from_tables[left_side] = left_side
+                                        left_name = left_side
                                     else:
                                         error("nonexistent table used in FROM clause")
 
@@ -640,12 +654,12 @@ def parse_query(this_query, inp_line):
                                 else:
                                     # no alias found, just insert to query from_table
                                     # strip whitespace from ends
-                                    name = name.rstrip().lstrip()
+                                    right_side = right_side.rstrip().lstrip()
 
                                     # validate table name
-                                    if name in TABLES:
-                                        this_query.from_tables[name] = name
-                                        right_name = name
+                                    if right_side in TABLES:
+                                        this_query.from_tables[right_side] = right_side
+                                        right_name = right_side
                                     else:
                                         error("nonexistent table used in FROM clause")
 
@@ -680,7 +694,10 @@ def parse_query(this_query, inp_line):
                                             error(" invalid table name in join ON clause.")
 
                                 # add join to this_query
-                                this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
+                                if left_on is None or right_on is None:
+                                    this_query.joins.append((join_type, left_name, right_name, None, None))
+                                else:
+                                    this_query.joins.append((join_type, left_name, right_name, left_on[1], right_on[1]))
 
                             else:
                                 pass        # do nothing for the middle partition (i == 1)
@@ -744,12 +761,12 @@ def parse_query(this_query, inp_line):
                             else:
                                 # no alias found, just insert to query from_table
                                 # strip whitespace from ends
-                                name = name.rstrip().lstrip()
+                                right_side = right_side.rstrip().lstrip()
 
                                 # validate table name
-                                if name in TABLES:
-                                    this_query.from_tables[name] = name
-                                    right_name = name
+                                if right_side in TABLES:
+                                    this_query.from_tables[right_side] = right_side
+                                    right_name = right_side
                                 else:
                                     error("nonexistent table used in FROM clause")
 
@@ -828,7 +845,6 @@ def parse_query(this_query, inp_line):
         ### parse SELECT ###
         # tokenize contents of SELECT on ',' --> break up attributes
         select_list = select_clause.split(",")
-
         for attr in range(len(select_list)):
             agg_list = select_list[attr].split("(")  # opening parenthesis is beginning of aggregate operator
             if len(agg_list) > 1:
@@ -856,10 +872,8 @@ def parse_query(this_query, inp_line):
                         this_query.select_attr.append(attr_tup)
                     else:
                         error(" valid table name.  Invalid attribute in SELECT clause")
-                        pass
                 else:
                     error(" invalid table used in SELECT clause")
-                    pass
 
                 # validate aggregate operator
                 if len(close_paren_list) != 2:
@@ -886,7 +900,6 @@ def parse_query(this_query, inp_line):
                     attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
                 elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
                     error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                    pass
                 else:
                     # only one table in from, dont need to specify table
                     table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
@@ -896,15 +909,24 @@ def parse_query(this_query, inp_line):
                 if attr_tup[0] in TABLES:
                     if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
                         this_query.select_attr.append(attr_tup)
+                    elif attr_tup[1] == "*":
+                        # * specified.  Add all attributes from the specified table
+                        for a in TABLES[attr_tup[0]].attribute_names:
+                            this_query.select_attr.append((attr_tup[0], a))
                     else:
                         error(" valid table name.  Invalid attribute in SELECT clause")
-                        pass
                 else:
                     error(" invalid table used in SELECT clause")
-                    pass
+
+
+            # remove any duplicate tuples
+            this_query.select_attr = list(set(this_query.select_attr))
 
         ### parse WHERE ###
-        this_query.where = parse_where(this_query, where_clause)
+        if where_clause != "":
+            this_query.where = parse_where(this_query, where_clause)
+        else:
+            this_query.where = None
 
         ### TODO parse additional clauses here (after have basics working) ###
 
