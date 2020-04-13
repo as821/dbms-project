@@ -55,6 +55,16 @@ def optimizer(this_query):
         where_evaluate(this_query, this_query.where, ret=False)
 
 
+    # determine tables involved in a join (do not perform projections for that table early)
+    outer_tables = []
+    for j in this_query.joins:
+        outer_tables.append(j[1])
+        outer_tables.append(j[2])
+    outer_tables = list(set(outer_tables))      # remove duplicates
+
+
+
+
 
 
 
@@ -91,12 +101,12 @@ def optimizer(this_query):
 
     # find ON clause attributes that would be removed by projections and include them (mark for later removal)
     attr_to_remove = []
-    for join in this_query.joins:
-        if join[0] != "natural" and join[0] != "equi":  # only look at those joins with an ON clause
-            left_table = join[1]
-            left_attr = join[3]
-            right_table = join[2]
-            right_attr = join[4]
+    for join_instance in this_query.joins:
+        if join_instance[0] != "natural" and join_instance[0] != "equi":  # only look at those joins with an ON clause
+            left_table = join_instance[1]
+            left_attr = join_instance[3]
+            right_table = join_instance[2]
+            right_attr = join_instance[4]
 
             if left_table in projection_tables:
                 left_attr_ind = this_query.from_tables[left_table][1][left_attr]
@@ -113,17 +123,19 @@ def optimizer(this_query):
                     attr_to_remove.append((right_table, right_attr))
 
     # perform projections
+    # only perform projections early if there is not an outer join included
     for table in projection_tables:
-        indices = list(sorted(projection_tables[table][0]))
-        # determine new dict for this relation, resulting from the projection
-        project_attr_dict = {}
-        counter = 0     # this works because indices are sorted and will be projected in this order too
-        for i in indices:
-            project_attr_dict[projection_tables[table][1][i]] = counter     # map attr name --> new index in relation
-            counter += 1
+        if table not in outer_tables:       # performing an early projection for an outer join is useless.  Will have to perform join again later
+            indices = list(sorted(projection_tables[table][0]))
+            # determine new dict for this relation, resulting from the projection
+            project_attr_dict = {}
+            counter = 0     # this works because indices are sorted and will be projected in this order too
+            for i in indices:
+                project_attr_dict[projection_tables[table][1][i]] = counter     # map attr name --> new index in relation
+                counter += 1
 
-        # pass in relation and list of indices to return
-        this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
+            # pass in relation and list of indices to return
+            this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
 
 
 
@@ -132,30 +144,36 @@ def optimizer(this_query):
 
     # order joins based on summed number of tuples
     if len(this_query.joins) > 0:
-        join_order = this_query.joins.sort(key= lambda x: TABLES[x[1]].storage.num_tuples + TABLES[x[2]].storage.num_tuples)
+        this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]]) + len(this_query.from_tables[x[2]])))
 
         # perform joins
-        for join in join_order:
+        for join_tup in this_query.joins:
             # left side
-            left_table = join[1]
-            left_attr = join(3)
+            left_table = join_tup[1]
+            left_attr = join_tup[3]
             if left_table in this_query.alias:
                 left_table = this_query.from_tables[left_table]     # get non-alias name
             if type(this_query.from_tables[left_table]) is str:     # check if left table was part of a join without loading relation
                 left_table = this_query.from_tables[left_table]
-            left_attr_index = this_query.from_tables[left_table][1][left_attr]      # determine index of desired attribute
+            if left_attr is not None:
+                left_attr_index = this_query.from_tables[left_table][1][left_attr]      # determine index of desired attribute
+            else:
+                left_attr_index = None
 
             # right side
-            right_table = join(2)
-            right_attr = join(4)
+            right_table = join_tup[2]
+            right_attr = join_tup[4]
             if right_table in this_query.alias:
                 right_table = this_query.from_tables[right_table]   # get non-alias name
             if type(this_query.from_tables[right_table]) is str:    # check if right table was part of a join without loading relation
                 right_table = this_query.from_tables[right_table]
-            right_attr_index = this_query.from_tables[right_table][1][right_attr]   # determine index of desired attribute
+            if right_attr is not None:
+                right_attr_index = this_query.from_tables[right_table][1][right_attr]   # determine index of desired attribute
+            else:
+                right_attr_index = None
 
             # determine join type based on the relative sizes of the relations to join
-            ty = join[0]        # get type of join.  This may need to be altered due to outer/inner table swaps
+            ty = join_tup[0]        # get type of join.  This may need to be altered due to outer/inner table swaps
             left_size = len(left_table)
             right_size = len(right_table)
             nested = False      # default to sort/merge
@@ -184,7 +202,7 @@ def optimizer(this_query):
             if ty == "equi":
                 # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
                 join_attr_dict = this_query.from_tables[left_table][1]
-                attr_offset = TABLES[left_table].num_attributes + 1  # + 1 since indexing starts at 0
+                attr_offset = len(join_attr_dict)  # + 1 since indexing starts at 0
                 for k in this_query.from_tables[right_table][1]:
                     attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
                     if this_query.from_tables[right_table][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
@@ -193,8 +211,8 @@ def optimizer(this_query):
             elif ty == "natural":
                 # determine attributes shared between tables to be natural joined
                 common_list = []
-                for a1 in TABLES[left_table].attribute_names:
-                    for a2 in TABLES[right_table].attribute_names:
+                for a1 in list(this_query.from_tables[left_table][1].keys()):
+                    for a2 in list(this_query.from_tables[right_table][1].keys()):
                         if a1 == a2:    # common attribute found
                             helper = (this_query.from_tables[left_table][1][a1], this_query.from_tables[right_table][1][a2])
                             common_list.append(helper[1])   # record common attribute indices in the right table
@@ -202,53 +220,39 @@ def optimizer(this_query):
 
                 # concatenate right attributes to left ones.  Drop common attributes from the right relation, as done by join function
                 join_attr_dict = this_query.from_tables[left_table][1]
-                attr_offset = TABLES[left_table].num_attributes + 1     # +1 since indexing starts at 0
-                counter = 1     # indexing for right table attributes start at 0.  Must +1 to the counter to avoid giving last attribute of left table and first of the right the same index
+                attr_offset = len(join_attr_dict)     # dont need +1 since indexing starts at 0
+                counter = 0     # indexing for right table attributes start at 0.  Must +1 to the counter to avoid giving last attribute of left table and first of the right the same index
                 for k in this_query.from_tables[right_table][1]:
                     if this_query.from_tables[right_table][1][k] not in common_list:
                         attr_ind = counter + attr_offset
                         join_attr_dict[k] = attr_ind        # map string name to index location
-            elif ty == "left":
+                        counter += 1
+            elif ty == "left" or ty == "right" or ty == "full":
                 # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
                 join_attr_dict = this_query.from_tables[left_table][1]
-                attr_offset = TABLES[left_table].num_attributes + 1  # + 1 since indexing starts at 0
+                attr_offset = len(join_attr_dict)  # doesnt need a +1 since indexing starts at 0
                 for k in this_query.from_tables[right_table][1]:
-                    attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
-                    if this_query.from_tables[right_table][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
-                        attr_ind -= 1
-                    join_attr_dict[k] = attr_ind
-            elif ty == "right":
-                # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
-                join_attr_dict = this_query.from_tables[left_table][1]
-                attr_offset = TABLES[left_table].num_attributes + 1  # + 1 since indexing starts at 0
-                for k in this_query.from_tables[right_table][1]:
-                    attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
-                    if this_query.from_tables[right_table][1][
-                        k] > right_attr_index:  # account for the removal of this duplicate attribute
-                        attr_ind -= 1
-                    join_attr_dict[k] = attr_ind
-            elif ty == "full":
-                ty = "outer"    # make compatible with join function
-                # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
-                join_attr_dict = this_query.from_tables[left_table][1]
-                attr_offset = TABLES[left_table].num_attributes + 1  # + 1 since indexing starts at 0
-                for k in this_query.from_tables[right_table][1]:
-                    attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
-                    if this_query.from_tables[right_table][1][
-                        k] > right_attr_index:  # account for the removal of this duplicate attribute
+                    raw_ind = this_query.from_tables[right_table][1][k]
+                    attr_ind = raw_ind + attr_offset
+                    if raw_ind == right_attr_index:
+                        join_attr_dict[k] = left_attr_index
+                        continue
+                    elif raw_ind > right_attr_index:  # account for the removal of this duplicate attribute
                         attr_ind -= 1
                     join_attr_dict[k] = attr_ind
             else:
                 error(" parsing error. Unrecognized join type in query optimizer.")
 
+            if ty == "full":
+                ty = "outer"    # make compatible with join function
+
             # join and store
+            joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0], left_attr_index, right_attr_index, ty, nested, natural_list)
             join_name = "JOIN_" + left_table + "_" + right_table
             this_query.from_tables[left_table] = join_name  # now when these are referenced, redirect to join result (this redirects are the only non-alias strings left in from_tables)
             this_query.from_tables[right_table] = join_name
 
 
-            joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0],
-                                   left_attr_index, right_attr_index, ty, nested, natural_list)
             this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
 
 
@@ -291,6 +295,39 @@ def optimizer(this_query):
 
             # pass in relation and list of indices to return
             this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), new_attr_dict)
+
+
+    # perform any projections that were delayed due to involvement of that table in an outer join
+    for table in projection_tables:
+        if table in outer_tables:  # performing an early projection for an outer join is useless.  Will have to perform join again later
+            projection_tables[table][1] = {}        # clear dictionary.  Mappings are no longer valid after the outer join
+            # since table was involved in a join, need to reference the result of that join
+            joined_table = table
+            if type(this_query.from_tables[table]) is str:
+                joined_table = this_query.from_tables[table]
+
+            # cannot trust pre-join indices.  Must recalculate indices for those attributes to keep
+            indices = []
+            for a in this_query.select_attr:
+                if a[0] == table:
+                    ind = this_query.from_tables[joined_table][1][a[1]]
+                    indices.append(ind)     # append the new attribute index to indices list
+                    projection_tables[table][1][ind] = a[1]
+
+            # make indices a sorted list
+            indices.sort()
+
+
+            # determine new dict for this relation, resulting from the projection
+            project_attr_dict = {}
+            counter = 0  # this works because indices are sorted and will be projected in this order too
+            for i in indices:
+                project_attr_dict[projection_tables[table][1][i]] = counter  # map attr name --> new index in relation
+                counter += 1
+
+            # pass in relation and list of indices to return
+            this_query.from_tables[joined_table] = (projection(this_query.from_tables[joined_table][0], indices), project_attr_dict)
+
 
 
 
