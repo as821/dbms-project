@@ -63,6 +63,8 @@ class Query:
         self.max = []
         self.min = []
         self.avg = []
+        self.sum = []
+        self.count = []
 
         # joins
         self.joins = []
