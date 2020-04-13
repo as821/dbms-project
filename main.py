@@ -15,7 +15,6 @@ from optimizer import optimizer
 #           #
 #   TODO    #
 #           #
-#   (parser.py)             test DML parsing (insert, update, delete)
 #   (backend.py)            implement DML mid level functions and aggregate operators
 #   (backend.py/main.py)    implement relational integrity (pick a default policy CASCADE/NULL).  Update referenced table in create table (main) and deleting from referenced table (remove and drop table)
 #   (optimizer.py)          add support for aggregate operators
@@ -40,28 +39,33 @@ def main():
     table2 = create_table("test2_rel", [("name", "string"), ("income", "int"), ("home_town", "string")])
 
 
-
     # TODO infinite loop for input here
 
 
     # take a string as input (contains entire query)
-    inp_line = "drop table test1_rel"
+    inp_line = ""
 
+    #       *** Sample inputs ***
+    #   "delete from test1_rel where test1_rel.name = \"Andrew\""
+    #   "update test1_rel set year = 0 where test1_rel.name = \"Andrew\""
     #   "create table test3_rel (name string, school_year string, hourly_salary int, primary key(name), foreign key (school_year) references test1_rel(year))"
     #   "SELECT name FROM test1_rel as a WHERE (((a.age <= 50) and (a.name = \"Andrew\")) or (a.year < 2000)) or ((a.year > 1400) or (a.name = \"Bob\"))"
+
+
+
+
+
+    # TODO testing section
+    task_manager(None)  # just writes a few tuples to each of the tables to make query testing better
+    create_index(TABLES["test1_rel"], "ind1", "name")
+    # TODO END testing section
+
 
 
 
     # call parser on line of input
     parsed_obj = parser_main(inp_line)
 
-
-
-
-    # TODO testing section
-    task_manager(parsed_obj)  # just writes a few tuples to each of the tables to make query testing better
-    create_index(TABLES["test1_rel"], "ind1", "name")
-    # TODO END testing section
 
 
 
