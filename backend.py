@@ -1108,13 +1108,29 @@ def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
 
 
 
+# aggregate functions (min, max, sum, avg, count).  Given a relation (list of lists) and an attribute index.
+def min_agg(relation, attr_ind):
+    values = [r[attr_ind] for r in relation]
+    return min(values)
 
 
+def max_agg(relation, attr_ind):
+    values = [r[attr_ind] for r in relation]
+    return max(values)
 
-# aggregate functions (min, max, sum).  Given a relation (list of lists) and an attribute index.
-#       Ex. min --> return relation of all tuples where the value at the given index == the min value in that attribute
+
+def avg_agg(relation, attr_ind):
+    values = [r[attr_ind] for r in relation]
+    return sum(values)/len(values)
 
 
+def count_agg(relation):
+    return len(relation)
+
+
+def sum_agg(relation, attr_ind):
+    values = [r[attr_ind] for r in relation]
+    return sum(values)
 
 
 
