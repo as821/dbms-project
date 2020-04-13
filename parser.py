@@ -54,6 +54,7 @@ def parser_main(inp_line):  # parameter
                 error(" invalid insert syntax")
             else:
                 table_name = table_name_attr[0].rstrip().lstrip()
+                dml_obj.table_name = table_name
                 table_columns = table_name_attr[1].replace(")", "").split(",")
 
                 for i in range(len(table_columns)):     # clean whitespace and closing )
@@ -100,6 +101,7 @@ def parser_main(inp_line):  # parameter
             if len(up) != 2:
                 error(" missing table name in update command.")
             table_name = up[1].lstrip().rstrip()
+            dml_obj.table_name = table_name
 
             # validate table name
             if table_name not in TABLES:
