@@ -39,6 +39,7 @@ from definitions import *
 
 
 
+
 #           #
 #   TODO    #
 #           #
@@ -1195,10 +1196,41 @@ def insert(table_name, attri_names, attri_values):
 
 
 # DML update operation
-# input: dml object
-# DML.set is a set of Comparison objects (detail which values to reset and what to set them to.
-# This was chosen due to ease of adapting the Comparison object (Comparison.assignment flag)
-# can perform the selection presented in the where clause using a call to the selection function
+def dml_update(dml_obj):
+    # evaluate where condition
+    update_list = where_dml(dml_obj.where)
+
+    # check referential integrity constraints (if parent/child, cannot update referencing/referenced attribute)
+    # parent check
+    referenced_attr = [t[0] for t in TABLES[dml_obj.table_name].child_tables]       # all attributes in this table being referenced by other tables
+    attr_to_update = [c.left_operand for c in dml_obj.set]                          # all attributes being updated by this command
+    if len(intersection(referenced_attr, attr_to_update)) > 0:
+        error("cannot update an attribute referenced by a foreign key (parent table)")
+
+    # child check
+    if TABLES[dml_obj.table_name].foreign_key[0] in attr_to_update:
+        error("cannot update a foreign key attribute (child table)")
+
+    # determine indices of the tuples to update in the relation
+    index_list = [None for u in range(len(update_list))]
+    rel = access(TABLES[dml_obj.table_name])
+    for u in range(len(update_list)):
+        for r in range(len(rel)):
+            if update_list[u] == rel[r]:
+                index_list[u] = r           # store index of the matching tuple in the stored relation
+    if None in index_list:
+        error("cannot update non-existent tuples")
+
+    # perform specified changes
+    for u in range(len(update_list)):
+        update_list[u] = function_to_apply(update_list[u])
+
+    # perform correct update (check for an index)
+    if TABLES[dml_obj.table_name].storage.index != "":      # index found
+        update_index(TABLES[dml_obj.table_name], update_list, index_list)
+    else:   # no index
+        update(TABLES[dml_obj.table_name], update_list, index_list)
+# END dml_update
 
 
 
@@ -1206,7 +1238,166 @@ def insert(table_name, attri_names, attri_values):
 
 
 
+#   function_to_apply   (helper function for DML update.  Performs operation specified in the SET clause)
+def function_to_apply(tup, dml_obj):
+    # determine what attribute to update
+    update_attr = TABLES[dml_obj.set[0].table_name].storage.attr_loc[dml_obj.set[0].left_operand]
+    orig_attr_type = TABLES[dml_obj.set[0].table_name].attributes[update_attr].type
 
+    # determine what operation to perform
+    if "+" in dml_obj.set[0].right_operand:
+        operands = dml_obj.set[0].right_operand.split("+")
+
+        # handle left
+        left_val = None
+        left = operands[0].lstrip().rstrip()
+        if left.isdigit():
+            if len(left.split(".")) > 1:
+                left_val = float(left)
+            else:
+                left_val = int(left)
+        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
+            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
+            left_val = tup[left_ind]
+        else:
+            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
+
+        # handle right
+        right_val = None
+        right = operands[1].lstrip().rstrip()
+        if right.isdigit():
+            if len(right.split(".")) > 1:
+                right_val = float(right)
+            else:
+                right_val = int(right)
+        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
+            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
+            right_val = tup[right_ind]
+        else:
+            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
+
+        # perform update and store result
+        result = left_val + right_val
+        if type(result) != orig_attr_type:
+            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        tup[update_attr] = result
+
+    elif "-" in dml_obj.set[0].right_operand:
+        operands = dml_obj.set[0].right_operand.split("-")
+
+        # handle left
+        left_val = None
+        left = operands[0].lstrip().rstrip()
+        if left.isdigit():
+            if len(left.split(".")) > 1:
+                left_val = float(left)
+            else:
+                left_val = int(left)
+        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
+            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
+            left_val = tup[left_ind]
+        else:
+            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
+
+        # handle right
+        right_val = None
+        right = operands[1].lstrip().rstrip()
+        if right.isdigit():
+            if len(right.split(".")) > 1:
+                right_val = float(right)
+            else:
+                right_val = int(right)
+        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
+            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
+            right_val = tup[right_ind]
+        else:
+            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
+
+        # perform update and store result
+        result = left_val - right_val
+        if type(result) != orig_attr_type:
+            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        tup[update_attr] = result
+    elif "*" in dml_obj.set[0].right_operand:
+        operands = dml_obj.set[0].right_operand.split("*")
+
+        # handle left
+        left_val = None
+        left = operands[0].lstrip().rstrip()
+        if left.isdigit():
+            if len(left.split(".")) > 1:
+                left_val = float(left)
+            else:
+                left_val = int(left)
+        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
+            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
+            left_val = tup[left_ind]
+        else:
+            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
+
+        # handle right
+        right_val = None
+        right = operands[1].lstrip().rstrip()
+        if right.isdigit():
+            if len(right.split(".")) > 1:
+                right_val = float(right)
+            else:
+                right_val = int(right)
+        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
+            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
+            right_val = tup[right_ind]
+        else:
+            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
+
+        # perform update and store result
+        result = left_val * right_val
+        if type(result) != orig_attr_type:
+            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        tup[update_attr] = result
+    elif "/" in dml_obj.set[0].right_operand:
+        operands = dml_obj.set[0].right_operand.split("/")
+
+        # handle left
+        left_val = None
+        left = operands[0].lstrip().rstrip()
+        if left.isdigit():
+            if len(left.split(".")) > 1:
+                left_val = float(left)
+            else:
+                left_val = int(left)
+        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
+            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
+            left_val = tup[left_ind]
+        else:
+            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
+
+        # handle right
+        right_val = None
+        right = operands[1].lstrip().rstrip()
+        if right.isdigit():
+            if len(right.split(".")) > 1:
+                right_val = float(right)
+            else:
+                right_val = int(right)
+        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
+            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
+            right_val = tup[right_ind]
+        else:
+            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
+
+        # perform update and store result
+        result = left_val / right_val
+        if type(result) != orig_attr_type:
+            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        tup[update_attr] = result
+    else:
+        quote_list = dml_obj.set[0].right_operand.split("\"")
+        if len(quote_list) == 3:
+            tup[update_attr] = quote_list[1].rstrip().lstrip()
+        else:
+            error("unknown value type in right operand of SET clause in DML update.")
+    return tup
+# END function_to_apply
 
 
 
@@ -1214,11 +1405,80 @@ def insert(table_name, attri_names, attri_values):
 
 
 # DML delete operation
+def dml_delete(dml_obj):
+    # evaluate where condition (if exists) to get those tuples to be removed
+    remove_tup = where_dml(dml_obj.where)
+
+    # check referential integrity constraints (if this is a parent table, need to apply CASCADE delete to child table)
+    if len(TABLES[dml_obj.table_name].child_tables) > 0:
+        for r in remove_tup:
+            for table in TABLES[dml_obj.table_name].child_tables:
+                child_removals = []
+
+                # find any matches
+                child_relation = access(TABLES[table[1]])
+                child_attr = table[2]
+                parent_attr = table[0]
+                for c_r in range(len(child_relation)):
+                    if r[parent_attr] == child_relation[c_r]:
+                        child_removals.append(c_r)
+
+                # remove duplicates (should not be needed, but just in case)
+                child_removals = list(set(child_removals))
+
+                # remove matches (update index if exists)
+                if TABLES[table[1]].storage.index != "":
+                    remove_index(TABLES[table[1]], child_removals)
+                else:
+                    remove(TABLES[table[1]], child_removals)
+
+
+    # check for index (call appropriate remove function)
+    if TABLES[dml_obj.table_name].storage.index != "":
+        remove_index(TABLES[dml_obj.table_name], remove_tup)
+    else:
+        remove(TABLES[dml_obj.table_name], remove_tup)
+# END dml_delete
 
 
 
 
 
+
+# where_dml        as of now --> only applies results to tables when ret = False (should only occur for top-level function call)
+def where_dml(cond):
+    if type(cond.left_operand) is tuple:
+        if type(cond.right_operand) is tuple:  # essentially an equi-join
+            error("only accepting simple WHERE clauses in dml operations.")
+        else:  # type(cond.left_operand) is tuple
+            # determine table
+            table = cond.left_operand[0]
+            attr = cond.left_operand[1]
+
+            # determine index of desired attribute
+            attr_index = TABLES[table].storage.attr_loc[attr]
+            return selection(this_query.from_tables[table][0], None, cond, attr_index, None)
+    elif type(cond.right_operand) is tuple:
+        # determine table
+        table = cond.right_operand[0]
+        attr = cond.right_operand[1]
+
+        # determine index of desired attribute
+        attr_index = TABLES[table].storage.attr_loc[attr]
+        return selection(this_query.from_tables[table][0], None, cond, attr_index, None)
+    elif cond.and_ or cond.or_:  # compound query
+        result_relation = []
+        attr_dict = {}
+        if cond.and_:
+            left = where_dml(cond.left_operand)
+            right = where_dml(cond.right_operand)
+        else:  # cond._or
+            left, left_dict, affected_left = where_dml(cond.left_operand)
+            right, right_dict, affected_right = where_dml(cond.right_operand)
+        return result_relation
+    else:
+        error(" no valid comparison does not use at least one table attribute.")
+# END where_dml
 
 
 
@@ -1243,6 +1503,7 @@ def task_manager(query):
     # write to tables
     inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
     write(table1, inp)
+    table1.primary_key = "name"
 
     # table 2
     inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
