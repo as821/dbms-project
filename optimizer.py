@@ -9,7 +9,7 @@
 
 
 from definitions import *
-from backend import access, selection, projection, join, union, difference, intersection
+from backend import access, selection, projection, join, union, difference, intersection, max_agg, min_agg, avg_agg, sum_agg, count_agg
 
 
 
@@ -332,18 +332,81 @@ def optimizer(this_query):
 
 
 
-    #
-    #   TODO apply aggregate operators
-    #
+    # determine if only selections are those using aggregate operators
+    all_agg = True
+    agg_count = 0
+    for s in this_query.select_attr:
+        t = s[:2]
+        if t not in this_query.min and t not in this_query.max and t not in this_query.sum and t not in this_query.avg and t not in this_query.count:
+            all_agg = False
+        else:
+            agg_count += 1
 
+    # if yes, only output one tuple
+    if agg_count > 0:
+        if all_agg:
+            output_list = []
+            for s in this_query.select_attr:
+                # get proper table name
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
 
+                # calculate aggregate value
+                val = 0
+                if s[2] == "max":
+                    val = max_agg(this_query.from_tables[table_name][0],  this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
 
+                # add to output list
+                output_list.append(val)
 
+            # output
+            return output_list
 
+        # if no, need to alter value to the min/max/avg/sum/count value for that attribute for every tuple in the relation
+        else:
+            for s in this_query.select_attr:
+                # determine if this select attribute has an aggregate operator
+                try:
+                    agg_type = s[2]
+                except IndexError:
+                    continue
 
+                # get proper table name
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
 
+                # calculate aggregate value
+                val = -1
+                if agg_type == "max":
+                    val = max_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
 
-
+                # apply this value to each tuple in the specified relation
+                for r in range(len(this_query.from_tables[s[0]])):
+                    tup = this_query.from_tables[s[0]][r]
+                    tup[s[1]] = val
+                    this_query.from_tables[s[0]][r] = tup
 
     # return resulting relation
     relation = []
