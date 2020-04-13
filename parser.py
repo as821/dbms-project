@@ -45,7 +45,7 @@ def parser_main(inp_line):  # parameter
             li = re.split(" into ", l[0])
             if len(li) != 2:
                 error(" invalid insert syntax")
-            table_name_attr = li[0].split("(")
+            table_name_attr = li[1].split("(")
             value_list = l[1].split("(")
 
 
@@ -54,15 +54,14 @@ def parser_main(inp_line):  # parameter
                 error(" invalid insert syntax")
             else:
                 table_name = table_name_attr[0].rstrip().lstrip()
-                table_columns = table_name_attr[1].split(",")
+                table_columns = table_name_attr[1].replace(")", "").split(",")
 
                 for i in range(len(table_columns)):     # clean whitespace and closing )
-                    table_columns[i] = table_columns[i].lstrip().rstrip().strip(")")
+                    table_columns[i] = table_columns[i].lstrip().rstrip()
 
-                if table_name in TABLES:
+                if table_name in TABLES:        # check that all attributes have been specified in the insert command
                     column_set = set(table_columns)
-                    if len(TABLES[table_name].attribute_name.difference(column_set)) != 0 or \
-                            len(column_set.difference(TABLES[table_name].attribute_name)) != 0:     # if difference is non-empty, sets are not identical
+                    if len(TABLES[table_name].attribute_names.difference(column_set)) != 0 or len(column_set.difference(TABLES[table_name].attribute_names)) != 0:     # if difference is non-empty, sets are not identical
                         error(" table names match, but attribute sets do not.")
                 else:
                     error(" invalid table name in insert.")
@@ -76,16 +75,16 @@ def parser_main(inp_line):  # parameter
                 if len(val_list) != 2:
                     error(" invalid syntax.  Missing )")
                 else:
-                    temp = val_list.split(",")
+                    temp = val_list[0].split(",")
                     for i in temp:
                         helper = i.rstrip().lstrip()
                         if helper.isdigit():
                             if len(helper.split(".")) != 1:
-                                dml_obj.append(float(helper))
+                                dml_obj.values.append(float(helper))
                             else:
-                                dml_obj.append(int(helper))
+                                dml_obj.values.append(int(helper))
                         else:
-                            dml_obj.values.append(helper)  # drop whitespace and insert into list
+                            dml_obj.values.append(helper.replace("\"", ""))  # drop whitespace and insert into list
 
 
 
