@@ -1179,11 +1179,31 @@ def insert(table_name, attri_names, attri_values):
 
 
 # DML update operation
+# input: dml object
+# DML.set is a set of Comparison objects (detail which values to reset and what to set them to.
+# This was chosen due to ease of adapting the Comparison object (Comparison.assignment flag)
+# can perform the selection presented in the where clause using a call to the selection function
+
+
+
+
+
+
+
+
+
+
 
 
 
 
 # DML delete operation
+
+
+
+
+
+
 
 
 
