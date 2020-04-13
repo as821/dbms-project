@@ -15,9 +15,8 @@ from optimizer import optimizer
 #           #
 #   TODO    #
 #           #
-#   (backend.py)            implement DML mid level functions and aggregate operators
+#   (backend.py)            implement DML mid level functions
 #   (backend.py/main.py)    implement relational integrity (pick a default policy CASCADE/NULL).  Update referenced table in create table (main) and deleting from referenced table (remove and drop table)
-#   (optimizer.py)          add support for aggregate operators
 #   (main.py)               write input loop
 #   (main.py)               handle DML objects
 
@@ -43,7 +42,7 @@ def main():
 
 
     # take a string as input (contains entire query)
-    inp_line = ""
+    inp_line = "select sum(age) from test1_rel"
 
     #       *** Sample inputs ***
     #   "delete from test1_rel where test1_rel.name = \"Andrew\""
