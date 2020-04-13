@@ -121,13 +121,15 @@ def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of
     for obj in obj_to_insert:
         if type(obj) is not list:           # error checking
             error("dev error in backend.write")
-        table_obj.storage.num_tuples += 1
         index_list.append(file.tell())      # record tuple location in file
         pickle.dump(obj, file)              # append tuple to the file
     list_loc = file.tell()
     pickle.dump(index_list, file)
     file.seek(0, 0)     # seek head of file to write new location of list of tuple locations in file
     file.write(struct.pack("L", list_loc))
+
+    # update num tuples
+    table_obj.storage.num_tuples += len(obj_to_insert)
 
     # close file
     file.close()
@@ -673,6 +675,23 @@ def create_table(table_name, attr):
 
 
 
+# drop table
+def drop_table(table_obj):
+    # remove any indices on the table
+    if table_obj.storage.index_name != "":
+        delete_index(table_obj, table_obj.storage.index_name)
+
+    # TODO referential integrity concerns here too...
+
+    delete_relation_storage(table_obj)
+    TABLES.pop(table_obj.name)
+# END drop_table
+
+
+
+
+
+
 
 
 # select function
@@ -830,34 +849,6 @@ def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
         else:
             pass        # TODO ?? with multiple attributes will be hard. Reroute those with one attribute in common to a sort/merge equijoin and only handle multi-attribute natural joins with nested loop
                         # issues with sorting on an unknown number of attributes
-
-            #     # sort left relation on join attribute
-    # relation1.sort(key=lambda x: (x[attr1]))
-    #
-    # # sort right relation
-    # relation2.sort(key=lambda x: (x[attr2]))
-    #
-    # # scan both tables for matches.  If match found, then add to return relation
-    # inner_index = 0       # let relation2 be the inner relation and relation1 be the outer relation
-    # outer_index = 0
-    # while inner_counter < len(relation2) and outer_counter < len(relation1):    # while still samples in both relations
-    #     key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
-    #     inner_group = []
-    #     while inner_index < len(relation2) and key == relation2[inner_index][attr2]:    # collects all samples with the given value
-    #         inner_group.append(relation2[inner_index])
-    #         inner_index += 1
-    #     outer_group = []
-    #     while outer_index < len(relation1) and key == relation1[outer_index][attr1]:    # collects all samples with the given value
-    #         outer_group.append(relation1[outer_index])
-    #         outer_index += 1
-    #
-    #     # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
-    #     # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-    #     for r1 in outer_group:
-    #         for r2 in inner_group:
-    #             # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-    #             helper = r1.append(r2[r] for r in range(len(r2)) if r != attr2)
-    #             return_relation.append(helper)
 
     elif typ == "outer":    # full outer join
         if nested:
@@ -1221,16 +1212,6 @@ def task_manager(query):
     inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
     write(table2, inp2)
 
-
-
-    # print(join(access(table1), access(table2), 0, 0, "outer", True, [(0, 0)]))
-    #
-    #
-    #
-    #
-    #
-    #
-    # print(selection(access(table1), None, query.where, table1.storage.attr_loc[query.where.left_operand[1]], None))
 # END task_manager
 
 
