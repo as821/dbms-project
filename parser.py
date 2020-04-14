@@ -227,6 +227,7 @@ def parser_main(inp_line):  # parameter
                     spl = attr.split(")", 1)    # only split on first parenthesis
                     key_attr = spl[0].split("(")[1]
 
+
                     # get table/attribute reference
                     table_attr_pair = re.split(" references", spl[1])[1]
                     h = table_attr_pair.split("(")
@@ -237,7 +238,7 @@ def parser_main(inp_line):  # parameter
                     if for_table not in TABLES:
                         error(" cannot have foreign key reference a nonexistent table.")
 
-                    if for_attr not in TABLES[for_table].attribute_names:
+                    if for_attr != TABLES[for_table].primary_key:
                         error(" cannot have foreign key reference a nonexistent attribute (existing table).")
 
                     # validate key attribute
@@ -250,6 +251,7 @@ def parser_main(inp_line):  # parameter
                         error(" foreign key attribute does not exist in this relation.")
 
                     # save result
+                    ddl_obj.primary_key = key_attr      # required for referential integrity
                     ddl_obj.foreign_key = (key_attr, for_table, for_attr)
                 else:
                     l = attr.split()
@@ -1298,7 +1300,7 @@ def parse_where_dml(this_query, where_clause):      # this_query included for ta
                         else:
                             error(" syntax error with \"...\" in WHERE clause.")
                     else:
-                        error(" unrecognized input in WHERE clause.")
+                        error(" unrecognized input in WHERE clause. (did you specify tables for all attributes used?)")
 
 
 
