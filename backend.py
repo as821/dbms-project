@@ -30,7 +30,7 @@
 
 
 from definitions import *
-
+from prettytable import PrettyTable
 
 
 
@@ -1492,7 +1492,24 @@ def where_dml(cond):
 
 
 
-
+#assumption that the relation is a list of lists
+#first list is the attribute names
+def output(relation):
+    #create table
+    output_table = PrettyTable()
+    
+    #input attribute names
+    output_table.field_names = relation[0]
+    
+    #skip first list, since it has attribute names
+    iter_relation = iter(relation)
+    next(iter_relation)   
+    #for loop adds all rows neeeded
+    for lis in iter_relation:
+        output_table.add_row(lis)
+        
+    print(output_table)
+#end of output
 
 
 
