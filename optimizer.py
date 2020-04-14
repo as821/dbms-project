@@ -454,11 +454,9 @@ def where_evaluate(this_query, cond, ret=False):
             left_attr = cond.left_operand[1]
 
             if left_table_name in this_query.alias:  # aliases should still map to strings
-                left_table_name = this_query.from_tables[
-                    left_table_name]  # get non-alias name in order to get access to stored relation
+                left_table_name = this_query.from_tables[left_table_name]  # get non-alias name in order to get access to stored relation
             if type(this_query.from_tables[left_table_name]) is str:
-                left_table_name = this_query.from_tables[
-                    left_table_name]  # left table was part of a join. Use result of a join
+                left_table_name = this_query.from_tables[left_table_name]  # left table was part of a join. Use result of a join
             left_attr_index = this_query.from_tables[left_table_name][1][left_attr]     # determine index of desired attribute
 
 
@@ -467,11 +465,9 @@ def where_evaluate(this_query, cond, ret=False):
             right_attr = cond.right_operand[1]
 
             if right_table_name in this_query.alias:
-                right_table_name = this_query.from_tables[
-                    right_table_name]  # get non-alias name in order to get access to stored relation
+                right_table_name = this_query.from_tables[right_table_name]  # get non-alias name in order to get access to stored relation
             if type(this_query.from_tables[right_table_name]) is str:
-                right_table_name = this_query.from_tables[
-                    right_table_name]  # left table was part of a join. Use result of a join
+                right_table_name = this_query.from_tables[right_table_name]  # left table was part of a join. Use result of a join
             right_attr_index = this_query.from_tables[right_table_name][1][right_attr]  # determine index of desired attribute
 
 
