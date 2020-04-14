@@ -653,7 +653,10 @@ def create_table(table_name, attr):
         table.attribute_names.add(at[0])
         attr_obj = Attribute()
         attr_obj.name = at[0]       # index 0 of the tuple is attribute name
-        attr_obj.type = at[1]       # index 1 of the tuple is attribute type (a string)
+        if at[1] == "string":
+            attr_obj.type = "str"
+        else:
+            attr_obj.type = at[1]       # index 1 of the tuple is attribute type (a string)
         table.attributes.append(attr_obj)
 
 
@@ -1151,37 +1154,45 @@ def difference(relation1, relation2):
     return [tup for tup in relation1+relation2 if tup not in relation1 or tup not in relation2]
 
 
-
-
-
-
 # DML insert operation
-#table_name = table to be inserted into
-#attri_name should have a corresponding attri_value that's inserted
 def dml_insert(dml_object):
     # input validation
     if dml_object.table_name not in TABLES:
-        valid_Input = False
         error("relations must exist to insert.")
-    #access table from global
-    table = TABLES[dml_object.table_name]   
-    #further validation
+    # access table from global
+    table = TABLES[dml_object.table_name]
+    # further validation
     if len(dml_object.values) != table.num_attributes:
         error("attributes given don't match the number of attributes in table.")
-    
-    #checks type of given input value
-    counter = 0   
-    for value in dml_object.values:
-        if type(value).__name__[0:3] != table.attributes[counter].type[0:3]:
-            print(value)
-            print(type(value).__name__)
-            print(table.attributes[counter].type[0:3])
-            error("given values type don't match that of the tables")
-        counter +=1
-    
-    #inserting
+
+    # checks type of given input value
+    for i in range(len(dml_object.values)):
+        if type(dml_object.values[i]).__name__ != table.attributes[i].type:
+            error("input value types do not match existing table.")
+
+    # referential integrity check
+    if len(table.foreign_key) > 0:
+        # this is a child table.  Search parent table for a matching value, if not found --> error
+        local_attr = table.storage.attr_loc[table.foreign_key[0]]
+        parent_table = table.foreign_key[1]
+        parent_attr = TABLES[parent_table].storage.attr_loc[table.foreign_key[2]]
+
+        parent_relation = access(TABLES[parent_table])
+        found = False
+        for r in parent_relation:
+            if r[parent_attr] == dml_object.values[local_attr]:
+                found = True
+                break
+
+        if not found:
+            error("cannot insert a value to a child table that does not match the parent table (relational integrity error).")
+
+
+
+
+    # inserting
     write(table, [dml_object.values])
-#end of DML insert
+# end of DML insert
 
 
 
@@ -1201,7 +1212,7 @@ def dml_update(dml_obj):
         error("cannot update an attribute referenced by a foreign key (parent table)")
 
     # child check
-    if TABLES[dml_obj.table_name].foreign_key[0] in attr_to_update:
+    if len(TABLES[dml_obj.table_name].foreign_key) > 0 and TABLES[dml_obj.table_name].foreign_key[0] in attr_to_update:
         error("cannot update a foreign key attribute (child table)")
 
     # determine indices of the tuples to update in the relation
@@ -1211,15 +1222,16 @@ def dml_update(dml_obj):
         for r in range(len(rel)):
             if update_list[u] == rel[r]:
                 index_list[u] = r           # store index of the matching tuple in the stored relation
+                break
     if None in index_list:
         error("cannot update non-existent tuples")
 
     # perform specified changes
     for u in range(len(update_list)):
-        update_list[u] = function_to_apply(update_list[u])
+        update_list[u] = function_to_apply(update_list[u], dml_obj)
 
     # perform correct update (check for an index)
-    if TABLES[dml_obj.table_name].storage.index != "":      # index found
+    if TABLES[dml_obj.table_name].storage.index_name != "":      # index found
         update_index(TABLES[dml_obj.table_name], update_list, index_list)
     else:   # no index
         update(TABLES[dml_obj.table_name], update_list, index_list)
@@ -1234,8 +1246,8 @@ def dml_update(dml_obj):
 #   function_to_apply   (helper function for DML update.  Performs operation specified in the SET clause)
 def function_to_apply(tup, dml_obj):
     # determine what attribute to update
-    update_attr = TABLES[dml_obj.set[0].table_name].storage.attr_loc[dml_obj.set[0].left_operand]
-    orig_attr_type = TABLES[dml_obj.set[0].table_name].attributes[update_attr].type
+    update_attr = TABLES[dml_obj.table_name].storage.attr_loc[dml_obj.set[0].left_operand]
+    orig_attr_type = TABLES[dml_obj.table_name].attributes[update_attr].type
 
     # determine what operation to perform
     if "+" in dml_obj.set[0].right_operand:
@@ -1271,8 +1283,9 @@ def function_to_apply(tup, dml_obj):
 
         # perform update and store result
         result = left_val + right_val
-        if type(result) != orig_attr_type:
-            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        if type(result).__name__ != orig_attr_type:
+            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
+                error("cannot change attribute type.  Invalid result in set clause of DML update")
         tup[update_attr] = result
 
     elif "-" in dml_obj.set[0].right_operand:
@@ -1308,8 +1321,9 @@ def function_to_apply(tup, dml_obj):
 
         # perform update and store result
         result = left_val - right_val
-        if type(result) != orig_attr_type:
-            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        if type(result).__name__ != orig_attr_type:
+            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
+                error("cannot change attribute type.  Invalid result in set clause of DML update")
         tup[update_attr] = result
     elif "*" in dml_obj.set[0].right_operand:
         operands = dml_obj.set[0].right_operand.split("*")
@@ -1344,8 +1358,9 @@ def function_to_apply(tup, dml_obj):
 
         # perform update and store result
         result = left_val * right_val
-        if type(result) != orig_attr_type:
-            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        if type(result).__name__ != orig_attr_type:
+            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
+                error("cannot change attribute type.  Invalid result in set clause of DML update")
         tup[update_attr] = result
     elif "/" in dml_obj.set[0].right_operand:
         operands = dml_obj.set[0].right_operand.split("/")
@@ -1380,8 +1395,9 @@ def function_to_apply(tup, dml_obj):
 
         # perform update and store result
         result = left_val / right_val
-        if type(result) != orig_attr_type:
-            error("cannot change attribute type.  Invalid result in set clause of DML update")
+        if type(result).__name__ != orig_attr_type:
+            if orig_attr_type != "int" or type(result).__name__ != "float":     # if original type is an int and result is a float, ignore
+                error("cannot change attribute type.  Invalid result in set clause of DML update")
         tup[update_attr] = result
     else:
         quote_list = dml_obj.set[0].right_operand.split("\"")
@@ -1450,7 +1466,7 @@ def where_dml(cond):
 
             # determine index of desired attribute
             attr_index = TABLES[table].storage.attr_loc[attr]
-            return selection(this_query.from_tables[table][0], None, cond, attr_index, None)
+            return selection(access(TABLES[table]), None, cond, attr_index, None)
     elif type(cond.right_operand) is tuple:
         # determine table
         table = cond.right_operand[0]
@@ -1458,7 +1474,7 @@ def where_dml(cond):
 
         # determine index of desired attribute
         attr_index = TABLES[table].storage.attr_loc[attr]
-        return selection(this_query.from_tables[table][0], None, cond, attr_index, None)
+        return selection(access(TABLES[table]), None, cond, attr_index, None)
     elif cond.and_ or cond.or_:  # compound query
         result_relation = []
         attr_dict = {}
@@ -1466,8 +1482,8 @@ def where_dml(cond):
             left = where_dml(cond.left_operand)
             right = where_dml(cond.right_operand)
         else:  # cond._or
-            left, left_dict, affected_left = where_dml(cond.left_operand)
-            right, right_dict, affected_right = where_dml(cond.right_operand)
+            left = where_dml(cond.left_operand)
+            right = where_dml(cond.right_operand)
         return result_relation
     else:
         error(" no valid comparison does not use at least one table attribute.")
@@ -1496,10 +1512,13 @@ def task_manager(query):
     # write to tables
     inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
     write(table1, inp)
+    table1.foreign_key = ("name", "test2_rel", "name")
     table1.primary_key = "name"
 
     # table 2
     inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
+    table2.child_tables.append(("name", "test1_rel", "name"))
+    table2.primary_key = "name"
     write(table2, inp2)
 
 # END task_manager
