@@ -6,19 +6,16 @@
 
 # import statements
 from definitions import *
-from backend import access, create_index, delete_index, create_table, drop_table, selection, projection, join, task_manager
+from backend import access, create_index, delete_index, create_table, drop_table, selection, projection, join, task_manager, dml_delete, dml_update, dml_insert
 from parser import parser_main
 from optimizer import optimizer
-import time
 
 
 
 #           #
 #   TODO    #
 #           #
-#   (backend.py)            test/implement DML mid level functions (add relational integrity constriants to insert operation)
 #   (main.py)               write input loop
-#   (main.py)               handle DML objects
 #   (main.py)               output resulting relation properly
 #   (backend.py)            automatically add an index on the primary key of a table
 
@@ -28,7 +25,6 @@ import time
 #   NOW (time logging function)
 #   EXPLAIN (outputs information about optimizer decisions)
 #   Support multiple foreign keys for each table\
-#   time for a query to execute
 
 
 
@@ -46,7 +42,7 @@ def main():
 
 
     # take a string as input (contains entire query)
-    inp_line = "update test1_rel set age = age + 5 where test1_rel.age < 100"
+    inp_line = "insert into test1_rel (name, age, year) values (\"joe\", 31, 2200)"
 
     #       *** Sample inputs ***
     #   "delete from test1_rel where test1_rel.name = \"Andrew\""
@@ -89,11 +85,11 @@ def main():
     # call appropriate DDL/DML command
     elif type(parsed_obj) is DML:
         if parsed_obj.insert:
-            pass        # TODO call dml_insert from backend
+            dml_insert(parsed_obj)
         elif parsed_obj.delete:
-            pass        # TODO call dml_delete from backend
+            dml_delete(parsed_obj)
         else:   # update
-            pass        # TODO call dml_update from backend
+            dml_update(parsed_obj)
     else:   # DDL
         if parsed_obj.create:
             if parsed_obj.table:
@@ -115,11 +111,11 @@ def main():
                 drop_table(TABLES[parsed_obj.table_name])
             else:
                 delete_index(TABLES[INDEX[parsed_obj.index_name]], parsed_obj.index_name)
-    
-    
+
     end = time.time()
-    
-    #print(end-start)
+    print(end-start)
+
+
 # END main
 
 
