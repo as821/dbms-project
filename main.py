@@ -9,6 +9,7 @@ from definitions import *
 from backend import access, create_index, delete_index, create_table, drop_table, selection, projection, join, task_manager
 from parser import parser_main
 from optimizer import optimizer
+import time
 
 
 
@@ -41,6 +42,7 @@ def main():
 
 
     # TODO infinite loop for input here
+    start = time.time()
 
 
     # take a string as input (contains entire query)
@@ -113,6 +115,11 @@ def main():
                 drop_table(TABLES[parsed_obj.table_name])
             else:
                 delete_index(TABLES[INDEX[parsed_obj.index_name]], parsed_obj.index_name)
+    
+    
+    end = time.time()
+    
+    #print(end-start)
 # END main
 
 
