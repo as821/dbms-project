@@ -15,17 +15,19 @@ from optimizer import optimizer
 #           #
 #   TODO    #
 #           #
-#   (backend.py)            implement DML mid level functions
-#   (backend.py/main.py)    implement relational integrity (pick a default policy CASCADE/NULL).  Update referenced table in create table (main) and deleting from referenced table (remove and drop table)
+#   (backend.py)            test/implement DML mid level functions (add relational integrity constriants to insert operation)
 #   (main.py)               write input loop
 #   (main.py)               handle DML objects
+#   (main.py)               output resulting relation properly
+#   (backend.py)            automatically add an index on the primary key of a table
 
 
 #   *** Features to add ***
 #   GROUPBY/HAVING
 #   NOW (time logging function)
 #   EXPLAIN (outputs information about optimizer decisions)
-#   Support multiple foreign keys for each table
+#   Support multiple foreign keys for each table\
+#   time for a query to execute
 
 
 
@@ -42,12 +44,12 @@ def main():
 
 
     # take a string as input (contains entire query)
-    inp_line = "select sum(age) from test1_rel"
+    inp_line = "update test1_rel set age = age + 5 where test1_rel.age < 100"
 
     #       *** Sample inputs ***
     #   "delete from test1_rel where test1_rel.name = \"Andrew\""
     #   "update test1_rel set year = 0 where test1_rel.name = \"Andrew\""
-    #   "create table test3_rel (name string, school_year string, hourly_salary int, primary key(name), foreign key (school_year) references test1_rel(year))"
+    #   "create table test3_rel (name string, school_year string, hourly_salary int, primary key(name), foreign key (name) references test1_rel(name))"
     #   "SELECT name FROM test1_rel as a WHERE (((a.age <= 50) and (a.name = \"Andrew\")) or (a.year < 2000)) or ((a.year > 1400) or (a.name = \"Bob\"))"
 
 
@@ -84,13 +86,26 @@ def main():
 
     # call appropriate DDL/DML command
     elif type(parsed_obj) is DML:
-        pass
+        if parsed_obj.insert:
+            pass        # TODO call dml_insert from backend
+        elif parsed_obj.delete:
+            pass        # TODO call dml_delete from backend
+        else:   # update
+            pass        # TODO call dml_update from backend
     else:   # DDL
         if parsed_obj.create:
             if parsed_obj.table:
                 create_table(parsed_obj.table_name, parsed_obj.attr)
                 TABLES[parsed_obj.table_name].primary_key = parsed_obj.primary_key
                 TABLES[parsed_obj.table_name].foreign_key = parsed_obj.foreign_key      # TODO should be doing more set up here (modifying table referenced from to show that it is referenced by this new table --> for relational integrity)
+
+                # if foreign key is being set, need to update table being referenced as well
+                if len(parsed_obj.foreign_key) > 0:
+                    foreign_table = parsed_obj.foreign_key[1]
+                    foreign_attr = parsed_obj.foreign_key[2]
+                    child_attr = parsed_obj.foreign_key[0]
+                    child_table = parsed_obj.table_name
+                    TABLES[foreign_table].child_tables.append((foreign_attr, child_table, child_attr))
             else:
                 create_index(TABLES[parsed_obj.table_name], parsed_obj.index_name, parsed_obj.attr[0])
         else:   # drop
