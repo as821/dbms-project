@@ -25,7 +25,8 @@ class Table:
         self.attributes = []            # list of Attribute objects for this Table
         self.storage = object()         # object() is a placeholder for Storage obj
         self.primary_key = ""
-        self.foreign_key = tuple()      # Table, attribute
+        self.foreign_key = tuple()      # format: (local_attr, parent table, parent attribute)
+        self.child_tables = []          # list of tuples: (local_attribute, child table, child attribute)
 # END Table class
 
 
