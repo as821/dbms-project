@@ -15,6 +15,7 @@ from backend import access, selection, projection, join, union, difference, inte
 
 
 def optimizer(this_query):
+    explain_string = ""
     # check that queries are atomic
     if this_query.union or this_query.intersect or this_query.difference:
         left_list, left = optimizer(this_query.left_query)
@@ -54,14 +55,14 @@ def optimizer(this_query):
                 name = right_list[i]
             out_list.append(name)
 
-        return out_list, result
+        return out_list, result, explain_string
     # END non-atomic query handling
 
 
     # load all relations needed for this query
     # look through selects for any indexed attributes (only have to retrieve samples with that given value
     # perform early selections (only those that can be accessed with an index)
-    if not where_access(this_query.where, this_query):
+    if not where_access(this_query.where, this_query, explain_string):
         this_query.where = None  # tree of comparisons is not longer needed
 
     # access remaining tables
@@ -75,6 +76,7 @@ def optimizer(this_query):
     # perform remaining selections
     if this_query.where is not None:    # if conditions left to evaluate
         where_evaluate(this_query, this_query.where, ret=False)
+        explain_string += "\nAll selections performed"
 
 
     # determine tables involved in a join (do not perform projections for that table early)
@@ -155,6 +157,7 @@ def optimizer(this_query):
 
             # pass in relation and list of indices to return
             this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
+            explain_string = explain_string + "\nProjection: " + "".join([*projection_tables[table][1].values()]) + " for table " + table + " performed before joins."
 
 
 
@@ -164,7 +167,7 @@ def optimizer(this_query):
     # order joins based on summed number of tuples
     if len(this_query.joins) > 0:
         this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]][0]) + len(this_query.from_tables[x[2]][0])))     # perform smallest join first
-
+        explain_string = explain_string + "\nJoin order: " + "".join(["\tPair: " + str(x[1]) + ' '+ str(x[2]) for x in this_query.joins])
         # perform joins
         for join_tup in this_query.joins:
             # left side
@@ -197,10 +200,12 @@ def optimizer(this_query):
             right_size = len(this_query.from_tables[right_table][0])
             nested = False      # default to sort/merge
             if left_size >= JOIN_MULT*right_size or right_size >= JOIN_MULT*left_size:
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": nested join"
                 nested = True   # if relation sizes are significantly different, use nested loop join
 
                 # determine outer table (the left table) --> switch names, attribute indices, and type of join (left <--> right)
                 if right_size < left_size:      # if smaller table is not the outer table, then flip relation positions
+                    explain_string += ". Table order flipped"
                     temp_relation = left_table
                     left_table = right_table
                     right_table = temp_relation
@@ -214,6 +219,8 @@ def optimizer(this_query):
                         ty = "right"
                     elif ty == "right":
                         ty = "left"
+            else:
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": sort/merge join"
 
             # determine attribute index dictionary for the result of the join (currently if/else all contain same code.  May change if decide to handle outer joins differently)
             natural_list = []
@@ -319,6 +326,8 @@ def optimizer(this_query):
 
             # pass in relation and list of indices to return
             this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), new_attr_dict)
+            explain_string = explain_string + "\nProjections delayed because needed in ON clause: " + "".join([str(remove_table[table][1][i]) + " " for i in indices]) + " for " + table + " performed."
+
 
 
     # perform any projections that were delayed due to involvement of that table in an outer join
@@ -351,8 +360,7 @@ def optimizer(this_query):
 
             # pass in relation and list of indices to return
             this_query.from_tables[joined_table] = (projection(this_query.from_tables[joined_table][0], indices), project_attr_dict)
-
-
+            explain_string = explain_string + "\nProjections delayed because table involved in a join" + "".join([*projection_tables[table][1].values()]) + " for " + table + " performed."
 
 
 
@@ -395,7 +403,7 @@ def optimizer(this_query):
                 output_list.append(val)
 
             # output
-            return output_list
+            return [], output_list, explain_string
 
         # if no, need to alter value to the min/max/avg/sum/count value for that attribute for every tuple in the relation
         else:
@@ -460,9 +468,6 @@ def optimizer(this_query):
     for ta in range(len(tables_to_output)):
         local_attr_list = [*this_query.from_tables[tables_to_output[ta]][1]]
         attr_out_list.extend(local_attr_list)
-
-
-
         table = this_query.from_tables[tables_to_output[ta]][0]
         for t in range(len(table)):
             if ta == 0:     # allows for direct indexing of the relation list below (and allows for all iterations of outer for loop to be the same)
@@ -471,7 +476,7 @@ def optimizer(this_query):
             relation[t].extend(tup) # append information to that information already in the relation to be outputted
 
 
-    return attr_out_list, relation
+    return attr_out_list, relation, explain_string
 # END optimizer
 
 
@@ -642,7 +647,7 @@ def where_evaluate(this_query, cond, ret=False):
 
 
 # find where clause in an and.  Access early if possible and alter select tree to reflect this
-def where_access(this_comparison, this_query):
+def where_access(this_comparison, this_query, explain_string):
     if this_comparison is None:
         return False
 
@@ -667,6 +672,7 @@ def where_access(this_comparison, this_query):
                     try:
                         this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name),
                                                                         TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
                         remove_and = True
                         keep_left = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
@@ -678,6 +684,7 @@ def where_access(this_comparison, this_query):
                     try:
                         this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand,
                                      TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
                         remove_and = True
                         keep_right = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
@@ -695,7 +702,7 @@ def where_access(this_comparison, this_query):
                     # copy contents of right_operand into this_comparison
                     this_comparison.copy(this_comparison.right_operand)
         else:
-            if not where_access(this_comparison.left_operand, this_query):
+            if not where_access(this_comparison.left_operand, this_query, explain_string):
                 left_prune = True
 
 
@@ -715,6 +722,7 @@ def where_access(this_comparison, this_query):
                 if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
                     try:
                         this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
                         remove_and = True
                         keep_left = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
@@ -725,6 +733,7 @@ def where_access(this_comparison, this_query):
                 if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
                     try:
                         this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
                         remove_and = True
                         keep_right = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
@@ -742,7 +751,7 @@ def where_access(this_comparison, this_query):
                     # copy contents of right_operand into this_comparison
                     this_comparison.copy(this_comparison.right_operand)
         else:
-            if not where_access(this_comparison.right_operand, this_query):
+            if not where_access(this_comparison.right_operand, this_query, explain_string):
                 right_prune = True
 
 
@@ -762,47 +771,37 @@ def where_access(this_comparison, this_query):
             return True     # no parent-level pruning needed
 
     elif this_comparison.equal and this_comparison.leaf:    # this only happens if is initially only one condition exists in the where clause
-        remove_and = False
-        keep_left = True
-        keep_right = True
-        cond = this_comparison.right_operand
-        left = type(cond.left_operand) is tuple
-        right = type(cond.right_operand) is tuple
+
+        #   select i-i-hundred.id from i-i-hundred  as i natural join i-1-hundred  as one natural join i-i-thousand where (i-i-thousand.id = 30)
+        evaluated = False
+        left = type(this_comparison.left_operand) is tuple
+        right = type(this_comparison.right_operand) is tuple
 
         # if one of the operands is a tuple and the other is not
         if left and not right:
             # check for an index on this attribute
-            table_name = this_query.from_tables[cond.left_operand[0]]
-            if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+            table_name = this_query.from_tables[this_comparison.left_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.left_operand[1]:
                 try:
-                    this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
-                    remove_and = True
-                    keep_left = False
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access_index(TABLES[table_name], this_comparison.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
                 except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                    this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
         elif right and not left:
             # check for an index on this attribute
-            table_name = this_query.from_tables[cond.right_operand[0]]
-            if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+            table_name = this_query.from_tables[this_comparison.right_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.right_operand[1]:
                 try:
-                    this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
-                    remove_and = True
-                    keep_right = False
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access_index(TABLES[table_name], this_comparison.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
                 except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                    this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
-
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
         # determine how to prune this branch
-        if remove_and:
-            if not keep_right:
-                if not keep_left:
-                    return False  # tell parent to remove this branch entirely
-                else:
-                    # copy contents of left_operand into this_comparison
-                    this_comparison.copy(this_comparison.left_operand)
-            elif not keep_left:
-                # copy contents of right_operand into this_comparison
-                this_comparison.copy(this_comparison.right_op)
-        return True     # this subtree should be maintained for later evaluation
+        if evaluated:       # if condition has been evaluated, remove it
+            return False
+        else:
+            return True
+
     else:
-        return True     # who knows whats in this condition, leave for later evaluation
+        return True     # who knows whats in this condition, leave in tree for later evaluation
 # END where_list
