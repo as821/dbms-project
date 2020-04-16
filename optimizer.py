@@ -147,6 +147,7 @@ def optimizer(this_query):
     # only perform projections early if there is not an outer join included
     for table in projection_tables:
         if table not in outer_tables:       # performing an early projection for an outer join is useless.  Will have to perform join again later
+            projection_tables[table][0] = list(set(projection_tables[table][0]))
             indices = list(sorted(projection_tables[table][0]))
             # determine new dict for this relation, resulting from the projection
             project_attr_dict = {}
@@ -157,7 +158,10 @@ def optimizer(this_query):
 
             # pass in relation and list of indices to return
             this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
-            explain_string = explain_string + "\nProjection: " + "".join([*projection_tables[table][1].values()]) + " for table " + table + " performed before joins."
+            l = [*projection_tables[table][1].values()]
+            li = [l[element] + ", " for element in range(len(l)) if element < (len(l)-1)]
+            li.append(l[-1])
+            explain_string = explain_string + "\nProjection: " + "".join(li) + " for table " + table + " performed before joins."
 
 
 
@@ -331,52 +335,59 @@ def optimizer(this_query):
 
 
     # perform any projections that were delayed due to involvement of that table in an outer join
+    joined_table_attrs = {}
     for table in projection_tables:
-        if table in outer_tables:  # performing an early projection for an outer join is useless.  Will have to perform join again later
-            projection_tables[table][1] = {}        # clear dictionary.  Mappings are no longer valid after the outer join
-            # since table was involved in a join, need to reference the result of that join
+        if table in outer_tables:  # performing an early projection for an outer join is useless.  Will have to perform projection again later
+            # get the joined relation name
             joined_table = table
-            if type(this_query.from_tables[table]) is str:
-                joined_table = this_query.from_tables[table]
+            while type(this_query.from_tables[joined_table]) is str:
+                joined_table = this_query.from_tables[joined_table]
 
-            # cannot trust pre-join indices.  Must recalculate indices for those attributes to keep
-            indices = []
+            if joined_table not in joined_table_attrs:
+                joined_table_attrs[joined_table] = ([], {})     # list to store all indices to keep, dictionary to map indices to names
+
+
+
+            # get the attributes to keep from "table" that are now in the joined table (and their indices in the joined relation
             for a in this_query.select_attr:
                 if a[0] == table:
                     ind = this_query.from_tables[joined_table][1][a[1]]
-                    indices.append(ind)     # append the new attribute index to indices list
-                    projection_tables[table][1][ind] = a[1]
-
-            # make indices a sorted list
-            indices.sort()
+                    joined_table_attrs[joined_table][0].append(ind)
+                    joined_table_attrs[joined_table][1][ind] = a[1]
 
 
-            # determine new dict for this relation, resulting from the projection
-            project_attr_dict = {}
-            counter = 0  # this works because indices are sorted and will be projected in this order too
-            for i in indices:
-                project_attr_dict[projection_tables[table][1][i]] = counter  # map attr name --> new index in relation
-                counter += 1
-
-            # pass in relation and list of indices to return
-            this_query.from_tables[joined_table] = (projection(this_query.from_tables[joined_table][0], indices), project_attr_dict)
-            explain_string = explain_string + "\nProjections delayed because table involved in a join" + "".join([*projection_tables[table][1].values()]) + " for " + table + " performed."
+    # after all tables have been examined, we now know all the attributes to keep from the joined relation.  Give those indices to projection function.  Update dictionaries to reflect this removal
+    for j in [*joined_table_attrs]:     # loop through the keys of joined_table_attrs
+        joined_table_attrs[j] = (list(set(joined_table_attrs[j][0])), joined_table_attrs[j][1])
 
 
+        # determine new dict for this relation, resulting from the projection
+        project_attr_dict = {}
+        counter = 0  # this works because indices are sorted and will be projected in this order too
+        for i in joined_table_attrs[j][0]:
+            project_attr_dict[joined_table_attrs[j][1][i]] = counter  # map attr name --> new index in relation
+            counter += 1
 
-    # determine if only selections are those using aggregate operators
+        # pass in relation and list of indices to return
+        this_query.from_tables[j] = (projection(this_query.from_tables[j][0], joined_table_attrs[j][0]), project_attr_dict)
+        explain_string = explain_string + "\nProjections delayed because table involved in a join " + "".join([*project_attr_dict]) + " for " + j + " performed."
+
+
+
+    # determine how aggregate operators are used in SELECT clause
     all_agg = True
     agg_count = 0
     for s in this_query.select_attr:
-        t = s[:2]
-        if t not in this_query.min and t not in this_query.max and t not in this_query.sum and t not in this_query.avg and t not in this_query.count:
-            all_agg = False
-        else:
+        if len(s) > 2:
             agg_count += 1
+        else:
+            all_agg = False
+
 
     # if yes, only output one tuple
     if agg_count > 0:
         if all_agg:
+            attr_list = []
             output_list = []
             for s in this_query.select_attr:
                 # get proper table name
@@ -400,18 +411,18 @@ def optimizer(this_query):
                     val = count_agg(this_query.from_tables[table_name][0])
 
                 # add to output list
+                attr_list.append(s[2] + "(" + s[1] + ")")
                 output_list.append(val)
 
             # output
-            return [], output_list, explain_string
+            return attr_list, [output_list], explain_string
 
         # if no, need to alter value to the min/max/avg/sum/count value for that attribute for every tuple in the relation
         else:
-            for s in this_query.select_attr:
+            for se in range(len(this_query.select_attr)):
+                s = this_query.select_attr[se]
                 # determine if this select attribute has an aggregate operator
-                try:
-                    agg_type = s[2]
-                except IndexError:
+                if len(s) <= 2:
                     continue
 
                 # get proper table name
@@ -422,6 +433,7 @@ def optimizer(this_query):
                     table_name = this_query.from_tables[table_name]
 
                 # calculate aggregate value
+                agg_type = s[2]
                 val = -1
                 if agg_type == "max":
                     val = max_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
@@ -434,11 +446,61 @@ def optimizer(this_query):
                 elif agg_type == "count":
                     val = count_agg(this_query.from_tables[table_name][0])
 
-                # apply this value to each tuple in the specified relation
-                for r in range(len(this_query.from_tables[s[0]])):
-                    tup = this_query.from_tables[s[0]][r]
-                    tup[s[1]] = val
-                    this_query.from_tables[s[0]][r] = tup
+                # store value for later application to the table
+                this_query.select_attr[se] = (s[0], s[1], s[2], val)
+
+
+
+            # remove any raw attributes that are no longer needed.  Get correct labels for outputting aggregate attributes
+            # check if attribute itself is needed for the query (check select_attr).  If not needed, overwrite with average value.  Else, append new aggregate value to all tuples
+            remove_list = set()
+            for s in this_query.select_attr:
+                # determine if this select attribute has an aggregate operator
+                if len(s) <= 2:
+                    continue
+
+                keep_raw = False
+                for r in this_query.select_attr:        # looking for matches (need to keep raw if a match exists)
+                    if s != r and r not in remove_list:
+                        if len(r) == 2:      # only look at normal attributes
+                            if r == (s[0], s[1]):
+                                keep_raw = True
+                                break
+                        elif r[:2] == (s[0], s[1]) and r[:2] in remove_list:
+                            keep_raw = True     # the raw attribute that these 2 aggregate operations share has already been overwritten by the first one
+                            break
+
+
+                # if table being referenced has been used in a join
+                table = s[0]
+                while type(this_query.from_tables[table]) is str:
+                    table = this_query.from_tables[table]
+
+
+                if keep_raw:
+                    # append aggregate value to each tuple in the relation
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup.append(s[3])
+                        this_query.from_tables[table][0][r] = tup
+
+                    # update the dictionary to reflect this change
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = max(list(this_query.from_tables[table][1].values())) + 1     # take the max index and add 1
+
+                else:
+                    # overwrite original attribute and update dictionary
+                    attr = this_query.from_tables[table][1][s[1]]
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup[attr] = s[3]
+                        this_query.from_tables[table][0][r] = tup
+
+                    # update dictionary (remove the raw value and replace with the aggregate one)
+                    this_query.from_tables[table][1].pop(s[1])
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = attr
+
+                    # add raw to remove_list (avoid trying to remove it twice.  Use s[0] because table may be a join name)
+                    remove_list.add((s[0], s[1]))
 
 
     # update star_tables list to accommodate joins/aliasing
@@ -463,10 +525,10 @@ def optimizer(this_query):
             table = tables_to_include[tab] = this_query.from_tables[table]
     tables_to_output = list(set(tables_to_include))
 
-    # loop through tables to output.  Get contents of relations and attribute names (in order0
+    # loop through tables to output.  Get contents of relations and attribute names (in order)                 !!! TODO look into the "in order" stuff, make sure columns get the correct labels !!!
     attr_out_list = []
     for ta in range(len(tables_to_output)):
-        local_attr_list = [*this_query.from_tables[tables_to_output[ta]][1]]
+        local_attr_list = sorted(this_query.from_tables[tables_to_output[ta]][1], key=this_query.from_tables[tables_to_output[ta]][1].get)      # [*this_query.from_tables[tables_to_output[ta]][1]]
         attr_out_list.extend(local_attr_list)
         table = this_query.from_tables[tables_to_output[ta]][0]
         for t in range(len(table)):
