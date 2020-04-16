@@ -9,7 +9,7 @@
 
 
 from definitions import *
-from backend import access, selection, projection, join, union, difference, intersection, max_agg, min_agg, avg_agg, sum_agg, count_agg
+from backend import access, selection, projection, join, union, difference, intersection, max_agg, min_agg, avg_agg, sum_agg, count_agg, access_index
 
 
 
@@ -22,14 +22,11 @@ def optimizer(this_query):
 
         result = []
         if this_query.union:
-            # TODO call union function from backend.py and return result
-            pass
+            return union(left, right)
         elif this_query.intersect:
-            # TODO call intersect function from backend.py and return result
-            pass
+            return intersection(left, right)
         else:   # this_query.difference
-            # TODO call difference function from backend.py and return result
-            pass
+            return difference(left, right)
 
         return result
     # END non-atomic query handling
@@ -46,8 +43,7 @@ def optimizer(this_query):
         if key not in this_query.alias:
             if type(this_query.from_tables[key]) == str:
                 if this_query.from_tables[key] == key:  # only complete table names are self-referential
-                    # load in relation here
-                    this_query.from_tables[key] = (access(TABLES[key]), TABLES[key].storage.attr_loc)
+                    this_query.from_tables[key] = (access(TABLES[key]), TABLES[key].storage.attr_loc.copy())   # load in relation here
 
 
     # perform remaining selections
@@ -63,17 +59,9 @@ def optimizer(this_query):
     outer_tables = list(set(outer_tables))      # remove duplicates
 
 
-
-
-
-
-
-
-
-
-
     # perform projections   (be careful to check from_table names to see if they redirect to a JOIN result)
     projection_tables = {}      # map tables to column indices to save.  Dictionary of lists
+    star_tables = []
     for proj in this_query.select_attr:         # aggregate projections to avoid issues
         # determine table name
         if this_query.num_tables == 1:
@@ -88,6 +76,11 @@ def optimizer(this_query):
             # check if table has been included in a join
             if type(this_query.from_tables[table]) is str:  # if a string is stored and not a list of lists, then table was used in a join previously
                 table = this_query.from_tables[table]
+
+        # perform * later in optimizer (make compatible with joins)
+        if proj[1] == '*':
+            star_tables.append(proj[0])
+            continue
 
         # determine attribute index in table
         attr_index = this_query.from_tables[table][1][proj[1]]
@@ -144,7 +137,7 @@ def optimizer(this_query):
 
     # order joins based on summed number of tuples
     if len(this_query.joins) > 0:
-        this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]]) + len(this_query.from_tables[x[2]])))
+        this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]][0]) + len(this_query.from_tables[x[2]][0])))     # perform smallest join first
 
         # perform joins
         for join_tup in this_query.joins:
@@ -155,7 +148,7 @@ def optimizer(this_query):
                 left_table = this_query.from_tables[left_table]     # get non-alias name
             if type(this_query.from_tables[left_table]) is str:     # check if left table was part of a join without loading relation
                 left_table = this_query.from_tables[left_table]
-            if left_attr is not None:
+            if left_attr is not None and len(left_attr) > 0:
                 left_attr_index = this_query.from_tables[left_table][1][left_attr]      # determine index of desired attribute
             else:
                 left_attr_index = None
@@ -167,15 +160,15 @@ def optimizer(this_query):
                 right_table = this_query.from_tables[right_table]   # get non-alias name
             if type(this_query.from_tables[right_table]) is str:    # check if right table was part of a join without loading relation
                 right_table = this_query.from_tables[right_table]
-            if right_attr is not None:
+            if right_attr is not None and len(right_attr) > 0:
                 right_attr_index = this_query.from_tables[right_table][1][right_attr]   # determine index of desired attribute
             else:
                 right_attr_index = None
 
             # determine join type based on the relative sizes of the relations to join
             ty = join_tup[0]        # get type of join.  This may need to be altered due to outer/inner table swaps
-            left_size = len(left_table)
-            right_size = len(right_table)
+            left_size = len(this_query.from_tables[left_table][0])
+            right_size = len(this_query.from_tables[right_table][0])
             nested = False      # default to sort/merge
             if left_size >= JOIN_MULT*right_size or right_size >= JOIN_MULT*left_size:
                 nested = True   # if relation sizes are significantly different, use nested loop join
@@ -227,9 +220,10 @@ def optimizer(this_query):
                         attr_ind = counter + attr_offset
                         join_attr_dict[k] = attr_ind        # map string name to index location
                         counter += 1
+
             elif ty == "left" or ty == "right" or ty == "full":
                 # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
-                join_attr_dict = this_query.from_tables[left_table][1]
+                join_attr_dict = this_query.from_tables[left_table][1].copy()
                 attr_offset = len(join_attr_dict)  # doesnt need a +1 since indexing starts at 0
                 for k in this_query.from_tables[right_table][1]:
                     raw_ind = this_query.from_tables[right_table][1][k]
@@ -246,8 +240,12 @@ def optimizer(this_query):
             if ty == "full":
                 ty = "outer"    # make compatible with join function
 
+
             # join and store
-            joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0], left_attr_index, right_attr_index, ty, nested, natural_list)
+            if ty == "natural" and len(natural_list) < 0:
+                joined_relation = []    # no common attributes, so return an empty relation
+            else:
+                joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0], left_attr_index, right_attr_index, ty, nested, natural_list)
             join_name = "JOIN_" + left_table + "_" + right_table
             this_query.from_tables[left_table] = join_name  # now when these are referenced, redirect to join result (this redirects are the only non-alias strings left in from_tables)
             this_query.from_tables[right_table] = join_name
@@ -408,6 +406,16 @@ def optimizer(this_query):
                     tup[s[1]] = val
                     this_query.from_tables[s[0]][r] = tup
 
+
+    # update star_tables list to accommodate joins/aliasing
+    for st in range(len(star_tables)):
+        s = star_tables[st]
+        if s in this_query.alias:
+            s = this_query.from_tables[s]
+        while type(this_query.from_tables[s]) == str:
+            s = this_query.from_tables[s]
+        star_tables[st] = s
+
     # return resulting relation
     relation = []
 
@@ -417,19 +425,29 @@ def optimizer(this_query):
         table = tables_to_include[tab]
         if table in this_query.alias:
             table = tables_to_include[tab] = this_query.from_tables[table]
-        if type(this_query.from_tables[table]) == str:
-            tables_to_include[tab] = this_query.from_tables[table]
+        while type(this_query.from_tables[table]) == str:           # get to the table that does not contain a naming link to another relation
+            table = tables_to_include[tab] = this_query.from_tables[table]
     tables_to_output = list(set(tables_to_include))
 
+    # loop through tables to output.  Get contents of relations and attribute names (in order0
+    attr_out_list = []
     for ta in range(len(tables_to_output)):
+        local_attr_list = [*this_query.from_tables[tables_to_output[ta]][1]]
+        attr_out_list.extend(local_attr_list)
+
+
+
         table = this_query.from_tables[tables_to_output[ta]][0]
         for t in range(len(table)):
-            if ta == 0:
+            if ta == 0:     # allows for direct indexing of the relation list below (and allows for all iterations of outer for loop to be the same)
                 relation.append([])
-            tup = table[t]
-            relation[t].extend(tup)
+            tup = table[t]          # get the information from the corresponding tuple of "ta" relation
+            relation[t].extend(tup) # append information to that information already in the relation to be outputted
 
-    return relation
+
+
+
+    return attr_out_list, relation
 # END optimizer
 
 
@@ -502,6 +520,8 @@ def where_evaluate(this_query, cond, ret=False):
 
             if table in this_query.alias:
                 table = this_query.from_tables[table]  # get non-alias name in order to get access to stored relation
+            if type(this_query.from_tables[table]) is str:
+                table = this_query.from_tables[table]
 
             # determine index of desired attribute
             attr_index = this_query.from_tables[table][1][attr]
@@ -541,7 +561,20 @@ def where_evaluate(this_query, cond, ret=False):
                 result_relation = intersection(left, right)
                 attr_dict = left_dict
             else:
-                error("dictionaries do not match.  Cannot perform intersection operation.")
+                # occurs when operands do not both operate on the same table.  As a result, store those that meet the respective conditions (may not be the right answer for more complex conditions)
+                if ret:     # ret means we are at an internal node of the tree of conditions, if so this solution may produce incorrect solutions (ex. if level above this is an or)
+                    error("dictionaries do not match.  Cannot perform intersection operation.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                    # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+
+                    return      # allowing function to terminate normally will overwrite the changes made here
+
         else:   # cond._or
             left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
             right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
@@ -549,7 +582,20 @@ def where_evaluate(this_query, cond, ret=False):
                 result_relation = union(left, right)
                 attr_dict = left_dict
             else:
-                error("dictionaries do not match. Cannot perform union operation.")
+                # occurs when operands do not both operate on the same table.  As a result, store those that meet the respective conditions (may not be the right answer for more complex conditions)
+                if ret:  # ret means we are at an internal node of the tree of conditions, if so this solution may produce incorrect solutions (ex. if level above this is an or)
+                    error("dictionaries do not match.  Cannot perform union operation.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                        # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+
+                    return      # allowing function to terminate normally will overwrite the changes made here
+
 
         # apply results to affected tables
         total_affected = list(set(affected_left + affected_right))   # combine lists and remove duplicates
@@ -581,7 +627,7 @@ def where_access(this_comparison, this_query):
         right_prune = False
 
         # handle left subtree
-        if this_comparison.left_operand.leaf:
+        if this_comparison.left_operand.leaf and this_comparison.left_operand.equal:
             remove_and = False
             keep_left = True
             keep_right = True
@@ -630,7 +676,7 @@ def where_access(this_comparison, this_query):
 
 
         # handle right subtree
-        if this_comparison.right_operand.leaf:
+        if this_comparison.right_operand.leaf and this_comparison.right_operand.equal:
             remove_and = False
             keep_left = True
             keep_right = True
@@ -644,21 +690,21 @@ def where_access(this_comparison, this_query):
                 table_name = this_query.from_tables[cond.left_operand[0]]
                 if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
                     try:
-                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
                         remove_and = True
                         keep_left = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
             elif right and not left:
                 # check for an index on this attribute
                 table_name = this_query.from_tables[cond.right_operand[0]]
                 if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
                     try:
-                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
                         remove_and = True
                         keep_right = False
                     except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
 
             # determine how to prune this branch
             if remove_and:
@@ -705,21 +751,21 @@ def where_access(this_comparison, this_query):
             table_name = this_query.from_tables[cond.left_operand[0]]
             if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
                 try:
-                    this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                    this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
                     remove_and = True
                     keep_left = False
                 except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                    this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                    this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
         elif right and not left:
             # check for an index on this attribute
             table_name = this_query.from_tables[cond.right_operand[0]]
             if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
                 try:
-                    this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                    this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
                     remove_and = True
                     keep_right = False
                 except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
-                    this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+                    this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
 
         # determine how to prune this branch
         if remove_and:
