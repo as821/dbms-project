@@ -62,7 +62,12 @@ def parser_main(inp_line):  # parameter
 
                 if table_name in TABLES:        # check that all attributes have been specified in the insert command
                     column_set = set(table_columns)
-                    if len(TABLES[table_name].attribute_names.difference(column_set)) != 0 or len(column_set.difference(TABLES[table_name].attribute_names)) != 0:     # if difference is non-empty, sets are not identical
+
+                    helper1 = TABLES[table_name].attribute_names.difference(column_set)
+                    helper2 = column_set.difference(TABLES[table_name].attribute_names)
+
+
+                    if len(helper1) != 0 or len(helper2) != 0:     # if difference is non-empty, sets are not identical
                         error(" table names match, but attribute sets do not.")
                 else:
                     error(" invalid table name in insert.")
@@ -908,7 +913,7 @@ def parse_query(this_query, inp_line):
                     # table specified
                     attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
                 elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table. (if using '*', need to specify table)")
                 else:
                     # only one table in from, dont need to specify table
                     table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
@@ -919,9 +924,8 @@ def parse_query(this_query, inp_line):
                     if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
                         this_query.select_attr.append(attr_tup)
                     elif attr_tup[1] == "*":
-                        # * specified.  Add all attributes from the specified table
-                        for a in TABLES[attr_tup[0]].attribute_names:
-                            this_query.select_attr.append((attr_tup[0], a))
+                        # * specified.  Add all attributes from the specified table (handled by optimizer)
+                        this_query.select_attr.append((attr_tup[0], '*'))
                     else:
                         error(" valid table name.  Invalid attribute in SELECT clause")
                 else:
@@ -1300,7 +1304,7 @@ def parse_where_dml(this_query, where_clause):      # this_query included for ta
                         else:
                             error(" syntax error with \"...\" in WHERE clause.")
                     else:
-                        error(" unrecognized input in WHERE clause. (did you specify tables for all attributes used?)")
+                        error(" unrecognized input in WHERE clause. (did you specify tables for all attributes used in WHERE clause?)")
 
 
 
