@@ -3,7 +3,9 @@
 #                                               #
 
 # import statements
-import os, struct, pickle, itertools, re
+import os, struct, pickle, itertools, re, time
+from prettytable import PrettyTable
+import tabulate as t
 
 
 
