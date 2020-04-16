@@ -17,18 +17,44 @@ from backend import access, selection, projection, join, union, difference, inte
 def optimizer(this_query):
     # check that queries are atomic
     if this_query.union or this_query.intersect or this_query.difference:
-        left = optimizer(this_query.left_query)
-        right = optimizer(this_query.right_query)
+        left_list, left = optimizer(this_query.left_query)
+        right_list, right = optimizer(this_query.right_query)
 
+        # perform proper
         result = []
         if this_query.union:
-            return union(left, right)
+            result = union(left, right)
         elif this_query.intersect:
-            return intersection(left, right)
+            result = intersection(left, right)
         else:   # this_query.difference
-            return difference(left, right)
+            result = difference(left, right)
 
-        return result
+
+        # determine naming
+        max_len = max(len(left_list), len(right_list))
+        out_list = []
+        for i in range(max_len):
+            # determine if attributes overlap
+            l = False
+            r = False
+            if i < len(left_list):
+                l = True
+            if i < len(right_list):
+                r = True
+
+            # logic for merging lists of attributes
+            if l and r:
+                if left_list[i] == right_list[i]:
+                    name = left_list[i]
+                else:
+                    name = left_list[i] + "/" + right_list[i]
+            elif l:
+                name = left_list[i]
+            elif r:
+                name = right_list[i]
+            out_list.append(name)
+
+        return out_list, result
     # END non-atomic query handling
 
 
@@ -443,8 +469,6 @@ def optimizer(this_query):
                 relation.append([])
             tup = table[t]          # get the information from the corresponding tuple of "ta" relation
             relation[t].extend(tup) # append information to that information already in the relation to be outputted
-
-
 
 
     return attr_out_list, relation
