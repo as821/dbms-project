@@ -30,7 +30,7 @@
 
 
 from definitions import *
-from prettytable import PrettyTable
+
 
 
 
@@ -63,8 +63,8 @@ from prettytable import PrettyTable
 def access(table_obj):
     # This function should return entire relation to the caller.  Caller can handle application of any selections/projections.
     # This should be a general purpose interface to the underlying data structure
-    
-    
+
+
     # check existence of Storage object
     if type(table_obj.storage) is object:
         error("storage object not created.")
@@ -85,7 +85,7 @@ def access(table_obj):
 
     # close file
     file.close()
-    
+
     # return the entire relation
     return relation
 # END access
@@ -199,11 +199,14 @@ def update(table_obj, update_list, index_list):
 # remove function
 def remove(table_obj, key_to_remove):
     # list of ints or a list of lists
-    
+
     # check Storage obj exists
     if type(table_obj.storage) is object:
         error("storage object not created.")
-    
+
+    if len(key_to_remove) == 0:
+        return      # no keys to remove, so end function
+
     # if list of indices, remove item at that index
     relation = []
     if type(key_to_remove[0]) is int:  # keys are in index form (like index number in the file/list --> tuple #)
@@ -286,7 +289,7 @@ def remove(table_obj, key_to_remove):
 def create_relation_storage(table_obj, storage_dir):
     table_obj.storage = Storage()
     table_obj.storage.filename = storage_dir + table_obj.name
-    
+
     file = open(table_obj.storage.filename, "wb+")  # open binary file for r/w
     file.write(struct.pack('L', 0))     # leave space at head of file for location of index table
     tuple_index = []                    # no tuples to insert into file yet, so empty
@@ -307,7 +310,7 @@ def delete_relation_storage(table_obj):
     # check if Storage object exists
     if type(table_obj.storage) is object:
         error("storage object not created.")
-    
+
     # delete file
     os.remove(table_obj.storage.filename)
 
@@ -1191,7 +1194,10 @@ def dml_insert(dml_object):
 
 
     # inserting
-    write(table, [dml_object.values])
+    if table.storage.index_name == "":
+        write(table, [dml_object.values])
+    else:
+        write_index(table, [dml_object.values])
 # end of DML insert
 
 
@@ -1202,7 +1208,10 @@ def dml_insert(dml_object):
 # DML update operation
 def dml_update(dml_obj):
     # evaluate where condition
-    update_list = where_dml(dml_obj.where)
+    if type(dml_obj.where) is Comparison:
+        update_list = where_dml(dml_obj.where)
+    else:
+        update_list = access(TABLES[dml_obj.table_name])
 
     # check referential integrity constraints (if parent/child, cannot update referencing/referenced attribute)
     # parent check
@@ -1426,24 +1435,24 @@ def dml_delete(dml_obj):
 
                 # find any matches
                 child_relation = access(TABLES[table[1]])
-                child_attr = table[2]
-                parent_attr = table[0]
+                child_attr = TABLES[table[1]].storage.attr_loc[table[2]]
+                parent_attr = TABLES[dml_obj.table_name].storage.attr_loc[table[0]]
                 for c_r in range(len(child_relation)):
-                    if r[parent_attr] == child_relation[c_r]:
+                    if r[parent_attr] == child_relation[c_r][child_attr]:
                         child_removals.append(c_r)
 
                 # remove duplicates (should not be needed, but just in case)
                 child_removals = list(set(child_removals))
 
                 # remove matches (update index if exists)
-                if TABLES[table[1]].storage.index != "":
+                if TABLES[table[1]].storage.index_name != "":
                     remove_index(TABLES[table[1]], child_removals)
-                else:
+                elif len(child_removals) > 0:
                     remove(TABLES[table[1]], child_removals)
 
 
     # check for index (call appropriate remove function)
-    if TABLES[dml_obj.table_name].storage.index != "":
+    if TABLES[dml_obj.table_name].storage.index_name != "":
         remove_index(TABLES[dml_obj.table_name], remove_tup)
     else:
         remove(TABLES[dml_obj.table_name], remove_tup)
@@ -1492,24 +1501,21 @@ def where_dml(cond):
 
 
 
-#assumption that the relation is a list of lists
-#first list is the attribute names
-def output(relation):
-    #create table
+# output
+def output(relation, attr_list):
+    # create table
     output_table = PrettyTable()
-    
-    #input attribute names
-    output_table.field_names = relation[0]
-    
-    #skip first list, since it has attribute names
+
+    # input attribute names
+    output_table.field_names = attr_list
+
+    # for loop adds all rows neeeded
     iter_relation = iter(relation)
-    next(iter_relation)   
-    #for loop adds all rows neeeded
     for lis in iter_relation:
         output_table.add_row(lis)
-        
+
     print(output_table)
-#end of output
+# end of output
 
 
 
@@ -1540,6 +1546,59 @@ def task_manager(query):
 
 # END task_manager
 
+
+
+
+
+
+
+
+
+
+# initializer
+def initializer():
+    # rel-i-i-1000
+    table1 = create_table("i-i-thousand", [("id", "int"), ("a", "int")])
+    inp_list = [[i, i] for i in range(1, 1001)]
+    write(table1, inp_list)
+
+
+    # rel-i-1-1000
+    table2 = create_table("i-1-thousand", [("id", "int"), ("b", "int")])
+    inp_list = [[i, 1] for i in range(1, 1001)]
+    write(table2, inp_list)
+
+
+
+    # rel-i-i-10000
+    table3 = create_table("i-i-ten_thousand", [("id", "int"), ("c", "int")])
+    inp_list = [[i, i] for i in range(1, 10001)]
+    write(table3, inp_list)
+
+
+
+
+    # rel-i-1-10000
+    table4 = create_table("i-1-ten_thousand", [("id", "int"), ("d", "int")])
+    inp_list = [[i, 1] for i in range(1, 10001)]
+    write(table4, inp_list)
+
+
+    #                           #
+    #   Potential extra credit  #
+    #                           #
+    # rel-i-i-100000
+    table5 = create_table("i-i-hundred", [("id", "int"), ("e", "int")])
+    inp_list = [[i, i] for i in range(1, 100001)]
+    write(table5, inp_list)
+
+
+
+    # rel-i-i-100000
+    table6 = create_table("i-1-hundred", [("id", "int"), ("f", "int")])
+    inp_list = [[i, 1] for i in range(1, 100001)]
+    write(table6, inp_list)
+# END initializer
 
 
 
