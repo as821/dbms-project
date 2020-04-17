@@ -1,1277 +1,562 @@
-#
-#   Backend functions   (a collection of functions with varying level of proximity to the actual data structures)
-#
 
 
+# optimizer.  Handles execution of atomic queries (NOT higher level queries with UNION/DIFFERENCE/INTERSECTION)
 
-
-#
-#   General design thoughts
-#
-
-#       for now, use numpy matrices as the underlying data structure
-#       use dictionary type for indices --> dictionaries in python are hashmaps
-
-#       store data in a file when not in use (serialize with pickle),  when want to access, load the file,
-#               seek to desired location, and load into memory
-
-#       how to create a DB index in python https://stackoverflow.com/questions/5580201/seek-into-a-file-full-of-pickled-objects
-#       size of a pickled object https://stackoverflow.com/questions/25653440/determine-size-of-pickled-datetime
-#       python file I/O https://www.programiz.com/python-programming/file-operation
-
-
-
-
-#
-#   Shared code with parser (once project is pieced together, they will all just be defined in one place
-#
-
+# to access the result of a join (stored in from_tables --> JOIN_leftTableName_rightTableName)  (user-inputted table names can never be capitalized)
+# when accessing attribute from a table that was joined, redirect to the join.  from_tables maps original relation name to JOIN... name (these pre-join tables
+#       are the only non-alias strings left in from_tables)
 
 
 
 from definitions import *
+from backend import access, selection, projection, join, union, difference, intersection, max_agg, min_agg, avg_agg, sum_agg, count_agg, access_index
+
+
+
+
+def optimizer(this_query):
+    explain_string = ""
+    # check that queries are atomic
+    if this_query.union or this_query.intersect or this_query.difference:
+        left_list, left = optimizer(this_query.left_query)
+        right_list, right = optimizer(this_query.right_query)
+
+        # perform proper
+        result = []
+        if this_query.union:
+            result = union(left, right)
+        elif this_query.intersect:
+            result = intersection(left, right)
+        else:   # this_query.difference
+            result = difference(left, right)
+
+
+        # determine naming
+        max_len = max(len(left_list), len(right_list))
+        out_list = []
+        for i in range(max_len):
+            # determine if attributes overlap
+            l = False
+            r = False
+            if i < len(left_list):
+                l = True
+            if i < len(right_list):
+                r = True
+
+            # logic for merging lists of attributes
+            if l and r:
+                if left_list[i] == right_list[i]:
+                    name = left_list[i]
+                else:
+                    name = left_list[i] + "/" + right_list[i]
+            elif l:
+                name = left_list[i]
+            elif r:
+                name = right_list[i]
+            out_list.append(name)
+
+        return out_list, result, explain_string
+    # END non-atomic query handling
+
+
+    # load all relations needed for this query
+    # look through selects for any indexed attributes (only have to retrieve samples with that given value
+    # perform early selections (only those that can be accessed with an index)
+    if not where_access(this_query.where, this_query, explain_string):
+        this_query.where = None  # tree of comparisons is not longer needed
+
+    # access remaining tables
+    for key in this_query.from_tables:
+        if key not in this_query.alias:
+            if type(this_query.from_tables[key]) == str:
+                if this_query.from_tables[key] == key:  # only complete table names are self-referential
+                    this_query.from_tables[key] = (access(TABLES[key]), TABLES[key].storage.attr_loc.copy())   # load in relation here
+
+
+    # perform remaining selections
+    if this_query.where is not None:    # if conditions left to evaluate
+        where_evaluate(this_query, this_query.where, ret=False)
+        explain_string += "\nAll selections performed"
+
+
+    # determine tables involved in a join (do not perform projections for that table early)
+    outer_tables = []
+    for j in this_query.joins:
+        outer_tables.append(j[1])
+        outer_tables.append(j[2])
+    outer_tables = list(set(outer_tables))      # remove duplicates
+
+
+    # perform projections   (be careful to check from_table names to see if they redirect to a JOIN result)
+    projection_tables = {}      # map tables to column indices to save.  Dictionary of lists
+    star_tables = []
+    for proj in this_query.select_attr:         # aggregate projections to avoid issues
+        # determine table name
+        if this_query.num_tables == 1:
+            table_keys = [*this_query.from_tables]
+            table = table_keys[0]
+            if table in this_query.alias:
+                table = this_query.from_tables[table]
 
-
-
-
-
-
-
-
-
-
-#           #
-#   TODO    #
-#           #
-
-# implement mid level functions
-# test mid level functions (select, projection, join)
-# handle foreign key dependencies in remove methods (see if removals impact other tables)
-
-
-
-
-
-
-
-#
-#   Low level functions
-#
-
-# access function
-#   (all general accesses to DB should be through this function)
-def access(table_obj):
-    # This function should return entire relation to the caller.  Caller can handle application of any selections/projections.
-    # This should be a general purpose interface to the underlying data structure
-
-
-    # check existence of Storage object
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # get index_list from file
-    file = open(table_obj.storage.filename, "rb")
-    list_location = struct.unpack("L", file.read(8))[0]    # Read first bytes of file and unpack them
-    file.seek(list_location, 0)   # seek list location
-    index_list = pickle.load(file)
-
-
-    # load relation from memory
-    relation = []
-    for ind in index_list:
-        file.seek(ind, 0)   # seek to specified index, with respect to the head of the file
-        relation.append(pickle.load(file))
-
-
-    # close file
-    file.close()
-
-    # return the entire relation
-    return relation
-# END access
-
-
-
-
-
-
-
-
-
-
-# write function
-#   (all write operations to DB through this function.  Need to find location(s) to write to and then make those edits
-#   (should be like an update function).  Must update any relevant indices too )
-#   !!! TODO CALLING FUNCTION MUST MAKE SURE ATTRIBUTES ARE IN THE CORRECT ORDER !!!
-def write(table_obj, obj_to_insert):    # TODO determine what DS to use (list of lists?? for a relation)
-    # if overwrite == True, clear entire relation and populate it with the contents of obj_to_insert
-    # obj_to_insert should be a list of lists (a list of instances to insert into the table) --> even if just a list around a single list
-
-    # check existence of Storage object
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # get index_list from file
-    file = open(table_obj.storage.filename, "rb+")
-    list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
-    file.seek(list_location, 0)  # seek list location
-    index_list = pickle.load(file)
-
-    # insert tuple at back of file (same address tuple_index used to be at)
-    file.seek(list_location, 0)  # seek list location
-    for obj in obj_to_insert:
-        if type(obj) is not list:           # error checking
-            error("dev error in backend.write")
-        index_list.append(file.tell())      # record tuple location in file
-        pickle.dump(obj, file)              # append tuple to the file
-    list_loc = file.tell()
-    pickle.dump(index_list, file)
-    file.seek(0, 0)     # seek head of file to write new location of list of tuple locations in file
-    file.write(struct.pack("L", list_loc))
-
-    # update num tuples
-    table_obj.storage.num_tuples += len(obj_to_insert)
-
-    # close file
-    file.close()
-# END write
-
-
-
-
-
-
-
-# update function
-#   need this in addition to the write function since write either inserts to back or
-#       overwites existing data
-#   pass in list of lists (list of instances) that contain the updates
-#   pass in a list of the same size that contains a list of indices to update
-def update(table_obj, update_list, index_list):
-    # check Storage object exists
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    if len(update_list) != len(index_list):
-        error("input lists to update function must be same length.")
-
-    # open file, get index list
-    file = open(table_obj.storage.filename, "rb+")
-    list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
-    file.seek(list_location, 0)  # seek list location
-    file_index_list = pickle.load(file)
-
-    # load relation from memory
-    relation = []
-    for ind in file_index_list:
-        file.seek(ind, 0)   # seek to specified index, with respect to the head of the file
-        relation.append(pickle.load(file))
-
-    # replace specified tuples with the corresponding one in update_list
-    count = 0
-    for up in index_list:
-        relation[up] = update_list[count]
-        count += 1
-
-    # clear current file contents (after space left for file_index_list file location)
-    file.seek(8, 0)
-    file.truncate()
-
-    # write updated relation to file
-    file_index_list = []
-    for r in relation:
-        file_index_list.append(file.tell())      # record tuple location in file
-        pickle.dump(r, file)              # append tuple to the file
-
-    # record new location of index list
-    list_loc = file.tell()
-    pickle.dump(file_index_list, file)
-    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
-    file.write(struct.pack("L", list_loc))
-
-    # close file
-    file.close()
-# END update
-
-
-
-
-# remove function
-def remove(table_obj, key_to_remove):
-    # list of ints or a list of lists
-
-    # check Storage obj exists
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    if len(key_to_remove) == 0:
-        return      # no keys to remove, so end function
-
-    # if list of indices, remove item at that index
-    relation = []
-    if type(key_to_remove[0]) is int:  # keys are in index form (like index number in the file/list --> tuple #)
-        # sort from largest to smallest (delete from back first --> less copying of the list)
-        key_to_remove.sort(reverse=True)
-
-        # access relation
-        relation = access(table_obj)
-
-        # delete specified tuples
-        for i in key_to_remove:
-            relation.pop(i)     # trust in calling function that index is valid
-            table_obj.storage.num_tuples -= 1
-
-    # if list of lists (match them on primary key (if exists) and remove.  if no primary key, then match entire lists to lists in file to remove proper one)
-    elif type(key_to_remove[0]) is list:
-        # access relation
-        relation = access(table_obj)
-
-        # loop through and match and delete specified tuples
-        relation_remove_list = []
-        for tup in range(len(relation)):
-            k_remove = -1
-            for k in range(len(key_to_remove)):
-                if relation[tup] == key_to_remove[k]:       # multiple linear search for a match
-                    # match found, mark both to be removed
-                    k_remove = k
-                    relation_remove_list.append(tup)
-                    table_obj.storage.num_tuples -= 1
-                    break                                   # outer loop tuple was found, move onto the next one
-
-            # remove tuple that is found from key_to_remove list
-            if k_remove != -1:
-                key_to_remove.pop(k_remove)
-
-        # remove from relation
-        count = 0
-        relation_remove_list.sort()     # perform lower index removals first to avoid issues with negative indexing
-        for r in relation_remove_list:
-            relation.pop(r-count)
-            count += 1      # accounts for offset from deleting tuples at a lower index than this one
-
-        # check that key_to_remove is empty (error if not)
-        if len(key_to_remove):   # empty relations evaluate to boolean false
-            error("trying to remove a tuple that does not exist.")
-
-    else:
-        error("input must be an integer index in the relation or a list of lists")
-
-
-
-    # write remaining relation back to file
-    file = open(table_obj.storage.filename, "rb+")
-    file.seek(8, 0)         # leave space for the index_list header
-    file.truncate()         # delete rest of file contents (overwrite it)
-    index_list = []
-
-    # insert tuple at back of file (same address tuple_index used to be at)
-    for obj in relation:
-        if type(obj) is not list:  # error checking
-            error("backend.remove write back")
-
-        index_list.append(file.tell())  # record tuple location in file
-        pickle.dump(obj, file)  # append tuple to the file
-    list_loc = file.tell()
-    pickle.dump(index_list, file)
-    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
-    file.write(struct.pack("L", list_loc))
-    file.close()
-# END remove
-
-
-
-
-
-
-# create relation function
-#   (for CREATE table command.  Produce the data structure for the given relation)
-#   !!! TODO IN CREATE TABLE COMMAND MUST POPULATE ATTRIBUTE INFORMATION FOR OTHER FUNCTIONS TO WORK !!!
-def create_relation_storage(table_obj, storage_dir):
-    table_obj.storage = Storage()
-    table_obj.storage.filename = storage_dir + table_obj.name
-
-    file = open(table_obj.storage.filename, "wb+")  # open binary file for r/w
-    file.write(struct.pack('L', 0))     # leave space at head of file for location of index table
-    tuple_index = []                    # no tuples to insert into file yet, so empty
-    index_location = file.tell()
-    pickle.dump(tuple_index, file)      # write empty list to file
-    file.seek(0, 0)                     # seek to beginning of the file
-    file.write(struct.pack('L', index_location))    # write location of index table
-    file.close()
-# END create relation
-
-
-
-
-
-# delete relation function
-#   (for DROP table function. This function only deletes the underlying data structure)
-def delete_relation_storage(table_obj):
-    # check if Storage object exists
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # delete file
-    os.remove(table_obj.storage.filename)
-
-    # remove references to Storage obj from table_obj
-    del table_obj.storage
-    table_obj.storage = object()    # placeholder
-# END delete_relation
-
-
-
-
-
-
-# create index function (create the underlying data structure for an index) --> only call on tables with a Storage obj defined
-def create_index(table_obj, index_name, attr):  # index_name is user specified index name.  Attr is the attribute the index is on
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # open file
-    file = open(table_obj.storage.filename, "rb+")
-    list_location = struct.unpack("L", file.read(8))[0]
-    file.seek(list_location, 0)  # seek list location
-    index_list = pickle.load(file)
-
-    # load relation from memory
-    relation = []
-    for ind in index_list:
-        file.seek(ind, 0)  # seek to specified index, with respect to the head of the file
-        relation.append(pickle.load(file))
-
-    # done with file I/O, close file
-    file.close()
-
-    # determine which index in the tuples is attr
-    if attr not in table_obj.storage.attr_loc:
-        error("tried to create an index on nonexistent attribute.")
-
-    attr_location = table_obj.storage.attr_loc[attr]
-
-
-    # record file location for the tuple in index dictionary, using attr value as key (not making changes to tuples --> no need to write back)
-    for r in range(len(relation)):
-        # if this attribute value has not been found yet
-        if relation[r][attr_location] not in table_obj.storage.index:
-            table_obj.storage.index[relation[r][attr_location]] = []    # allows indexing on non-keys if necessary
-
-        # add file location to the index
-        table_obj.storage.index[relation[r][attr_location]].append(index_list[r])
-
-
-    # add this index to INDEX
-    INDEX[index_name] = table_obj.name
-    table_obj.storage.index_name = index_name
-    table_obj.storage.index_attr = attr
-# END create_index
-
-
-
-
-
-
-# delete index function (delete an existing index)
-def delete_index(table_obj, index_name):
-    if index_name not in INDEX:
-        error("trying to delete a non-existent index.")
-
-    # remove key from INDEX
-    INDEX.pop(index_name)
-
-    # delete contents of index data structure
-    table_obj.storage.index = {}
-    table_obj.storage.index_attr = ""
-    table_obj.storage.index_name = ""
-# END delete_index
-
-
-
-
-
-
-
-# access index
-def access_index(table_obj, index_val, index_name):
-    # check storage object exists
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # check index validity
-    if index_name not in INDEX:
-        error("trying to access a nonexistent index.")
-    elif INDEX[index_name] != table_obj.name:
-        error("index specified does not match table.")
-    elif index_val not in table_obj.storage.index:
-        error("specified index key does not exist in index.")
-
-    # open file
-    file = open(table_obj.storage.filename, "rb")
-
-    # load specific tuples
-    tup = []
-    for loc in table_obj.storage.index[index_val]:
-        file.seek(loc, 0)  # seek to specified index, with respect to the head of the file
-        tup.append(pickle.load(file))
-
-    # close file
-    file.close()
-
-    # return
-    return tup
-# END access_index
-
-
-
-
-
-
-
-
-
-# write index       obj_to_insert must be a list of lists, even if only inserting one tuple
-def write_index(table_obj, obj_to_insert):
-    # check existence of Storage object
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # check index validity
-    if table_obj.storage.index_attr == "":
-        error("cannot write to a nonexistent index.")
-
-    # get the location in the tuple that the index key is stored at
-    index_key = table_obj.storage.attr_loc[table_obj.storage.index_attr]
-
-    # get index_list from file
-    file = open(table_obj.storage.filename, "rb+")
-    list_location = struct.unpack("L", file.read(8))[0]  # Read first bytes of file and unpack them
-    file.seek(list_location, 0)  # seek list location
-    index_list = pickle.load(file)
-
-    # insert tuple at back of file (same address tuple_index used to be at)
-    file.seek(list_location, 0)  # seek list location
-    for obj in obj_to_insert:
-        # error checking in function input
-        if type(obj) is not list:
-            error("backend.write invalid input format.")
-
-        # add tuple to file
-        loc = file.tell()
-        index_list.append(loc)  # record tuple location in file
-        pickle.dump(obj, file)  # append tuple to the file
-        table_obj.storage.num_tuples += 1
-
-        # record tuple location in index
-        if obj[index_key] not in table_obj.storage.index:
-            table_obj.storage.index[obj[index_key]] = []    # if attr value not previously in index, make an empty list
-        table_obj.storage.index[obj[index_key]].append(loc) # store location in the file
-
-    # write index_list and its location back to the file
-    list_loc = file.tell()
-    pickle.dump(index_list, file)
-    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
-    file.write(struct.pack("L", list_loc))
-
-    # close file
-    file.close()
-# END write_index
-
-
-
-
-
-
-
-
-
-# remove_index  (remove function for tables with indices) --> does not use index to access table, only updates it on deletion
-def remove_index(table_obj, key_to_remove):
-    # check Storage obj exists
-    if type(table_obj.storage) is object:
-        error("storage object not created.")
-
-    # check index validity
-    if table_obj.storage.index_attr == "":
-        error("called remove_index on a nonexistent index.")
-
-    # clear the current index, all going to be overwritten in writing back to the file
-    table_obj.storage.index = {}
-
-    # if list of indices, remove item at that index
-    relation = []
-    if type(key_to_remove[0]) is int:  # keys are in index form (like index number in the file/list --> tuple #)
-        # sort from largest to smallest (delete from back first --> less copying of the list)
-        key_to_remove.sort(reverse=True)
-
-        # access relation
-        relation = access(table_obj)
-
-        # delete specified tuples
-        for i in key_to_remove:
-            table_obj.storage.num_tuples -= 1
-            relation.pop(i)  # trust in calling function that index is valid
-
-    # if list of lists (match them on primary key (if exists) and remove.  if no primary key, then match entire lists to lists in file to remove proper one)
-    elif type(key_to_remove[0]) is list:
-        # access relation
-        relation = access(table_obj)
-
-        # loop through and match and delete specified tuples
-        relation_remove_list = []
-        for tup in range(len(relation)):
-            k_remove = -1
-            for k in range(len(key_to_remove)):
-                if relation[tup] == key_to_remove[k]:  # multiple linear search for a match
-                    # match found, mark both to be removed
-                    k_remove = k
-                    relation_remove_list.append(tup)
-                    table_obj.storage.num_tuples -= 1
-                    break  # outer loop tuple was found, move onto the next one
-
-            # remove tuple that is found from key_to_remove list
-            if k_remove != -1:
-                key_to_remove.pop(k_remove)
-
-        # remove from relation
-        count = 0
-        relation_remove_list.sort()  # perform lower index removals first to avoid issues with negative indexing
-        for r in relation_remove_list:
-            relation.pop(r - count)
-            count += 1  # accounts for offset from deleting tuples at a lower index than this one
-
-        # check that key_to_remove is empty (error if not)
-        if len(key_to_remove) != 0:  # empty relations evaluate to boolean false
-            error("tried to delete a tuple that does not exist.")
-
-    else:
-        error("invalid input not an integer or a list of lists.")
-
-    # write remaining relation back to file
-    file = open(table_obj.storage.filename, "rb+")
-    file.seek(8, 0)  # leave space for the index_list header
-    file.truncate()  # delete rest of file contents (overwrite it)
-    index_list = []
-
-
-    # determine location of index_attr in tuples of the relation
-    index_loc = table_obj.storage.attr_loc[table_obj.storage.index_attr]
-
-    # insert tuple at back of file (same address tuple_index used to be at)
-    for obj in relation:
-        if type(obj) is not list:  # error checking
-            error("backend.remove write back invalid input format (not a list)")
-
-        # write tuple to file
-        loc = file.tell()
-        index_list.append(loc)  # record tuple location in file
-        pickle.dump(obj, file)  # append tuple to the file
-
-        # check if attribute value already in the index, if not --> make an empty list
-        if obj[index_loc] not in table_obj.storage.index:
-            table_obj.storage.index[obj[index_loc]] = []
-
-        # add tuple location to the index
-        table_obj.storage.index[obj[index_loc]].append(loc)
-    list_loc = file.tell()
-    pickle.dump(index_list, file)
-    file.seek(0, 0)  # seek head of file to write new location of list of tuple locations in file
-    file.write(struct.pack("L", list_loc))
-    file.close()
-# END remove_index
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# update function
-#   need this in addition to the write function since write either inserts to back or
-#       overwites existing data
-#   pass in list of lists (list of instances) that contain the updates
-#   pass in a list of the same size that contains a list of indices to update
-def update_index(table_obj, update_list, index_list):
-    # cheap way to update with an index --> update as if no index
-    update(table_obj, update_list, index_list)
-
-    # then update index after all updates (create_index does not check for any existing indices)
-    create_index(table_obj, table_obj.storage.index_name, table_obj.storage.index_attr)
-# END update_index
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#
-#   Mid level functions
-#
-
-
-# create table      attr is an ordered list tuples containing attributes
-def create_table(table_name, attr):
-    # input validation
-    if table_name in TABLES:
-        error("relations cannot share names.")
-
-    if type(attr) is not list:
-        error("attr must be a list.")
-
-    # create Table object and populate it
-    table = Table()
-    table.name = table_name
-    table.num_attributes = len(attr)
-
-    table.attribute_names.clear()
-    table.attributes.clear()
-
-    for at in attr:
-        table.attribute_names.add(at[0])
-        attr_obj = Attribute()
-        attr_obj.name = at[0]       # index 0 of the tuple is attribute name
-        if at[1] == "string":
-            attr_obj.type = "str"
         else:
-            attr_obj.type = at[1]       # index 1 of the tuple is attribute type (a string)
-        table.attributes.append(attr_obj)
+            table = proj[0]     # stored table name
 
-    # create storage structure for this relation
-    create_relation_storage(table, STORAGE_DIR)
+            # check if table has been included in a join
+            if type(this_query.from_tables[table]) is str:  # if a string is stored and not a list of lists, then table was used in a join previously
+                table = this_query.from_tables[table]
 
-    # populate dictionary of attribute locations
-    for i in range(len(attr)):
-        table.storage.attr_loc[attr[i][0]] = i  # map attribute name to its location in the stored tuple
+        # perform * later in optimizer (make compatible with joins)
+        if proj[1] == '*':
+            star_tables.append(proj[0])
+            continue
 
-    # add this table to the global dictionary of tables
-    TABLES[table_name] = table
+        # determine attribute index in table
+        attr_index = this_query.from_tables[table][1][proj[1]]
 
-    # return the initialized Table object
-    return table
-# END create_table
-
-
-
-
-
-
-# drop table
-def drop_table(table_obj):
-    # remove any indices on the table
-    if table_obj.storage.index_name != "":
-        delete_index(table_obj, table_obj.storage.index_name)
-
-    # TODO referential integrity concerns here too...
-
-    delete_relation_storage(table_obj)
-    TABLES.pop(table_obj.name)
-# END drop_table
+        # store attribute in table-specific lists of list of projections and dictionary of attribute indices
+        if table not in projection_tables:
+            projection_tables[table] = [list(), dict()]
+        projection_tables[table][0].append(attr_index)
+        projection_tables[table][1][attr_index] = proj[1]   # reverse mapping.  Index --> attribute name
 
 
+    # find ON clause attributes that would be removed by projections and include them (mark for later removal)
+    attr_to_remove = []
+    for join_instance in this_query.joins:
+        if join_instance[0] != "natural" and join_instance[0] != "equi":  # only look at those joins with an ON clause
+            left_table = join_instance[1]
+            left_attr = join_instance[3]
+            right_table = join_instance[2]
+            right_attr = join_instance[4]
+
+            if left_table in projection_tables:
+                left_attr_ind = this_query.from_tables[left_table][1][left_attr]
+                if left_attr_ind not in projection_tables[left_table][1]:
+                    projection_tables[left_table][0].append(left_attr_ind)
+                    projection_tables[left_table][1][left_attr_ind] = left_attr
+                    attr_to_remove.append((left_table, left_attr))
+
+            if right_table in projection_tables:
+                right_attr_ind = this_query.from_tables[right_table][1][right_attr]
+                if right_attr_ind not in projection_tables[right_table][1]:
+                    projection_tables[right_table][0].append(right_attr_ind)
+                    projection_tables[right_table][1][right_attr_ind] = right_attr
+                    attr_to_remove.append((right_table, right_attr))
+
+    # perform projections
+    # only perform projections early if there is not an outer join included
+    for table in projection_tables:
+        if table not in outer_tables:       # performing an early projection for an outer join is useless.  Will have to perform join again later
+            projection_tables[table][0] = list(set(projection_tables[table][0]))
+            indices = list(sorted(projection_tables[table][0]))
+            # determine new dict for this relation, resulting from the projection
+            project_attr_dict = {}
+            counter = 0     # this works because indices are sorted and will be projected in this order too
+            for i in indices:
+                project_attr_dict[projection_tables[table][1][i]] = counter     # map attr name --> new index in relation
+                counter += 1
+
+            # pass in relation and list of indices to return
+            this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
+            l = [*projection_tables[table][1].values()]
+            li = [l[element] + ", " for element in range(len(l)) if element < (len(l)-1)]
+            li.append(l[-1])
+            explain_string = explain_string + "\nProjection: (" + "".join(li) + ") for table " + table + " performed before joins."
 
 
 
 
 
 
-# select function
-# relations are a list of lists.  Condition is a comparison object (should be atomic not contain other Comparison objects)
-# attr_index specifies the index of the attribute to be compared in the relation (which column number) --> avoid needing table knowledge here
-# if only trying to perform a one-table selection, only populate relation1, condition, and attr_index1. Leave rest null
-def selection(relation1, relation2, condition, attr_index1, attr_index2):
-    return_relation = []
-
-    # determine value to compare against
-    if type(condition.left_operand) == tuple:
-        if type(condition.right_operand) == tuple:
-            # TODO join.  Comparison between table attributes.  Best performed with a join (theta join or natural join)
-            # perform a join to perform this as an equi join
-            if condition.equal:
-                return_relation = join(relation1, relation2, attr_index1, attr_index2, "equi", False, None)
+    # order joins based on summed number of tuples
+    if len(this_query.joins) > 0:
+        this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]][0]) + len(this_query.from_tables[x[2]][0])))     # perform smallest join first
+        explain_string = explain_string + "\nJoin order: " + "".join(["\tPair: " + str(x[1]) + ' '+ str(x[2]) for x in this_query.joins])
+        # perform joins
+        for join_tup in this_query.joins:
+            # left side
+            left_table = join_tup[1]
+            left_attr = join_tup[3]
+            if left_table in this_query.alias:
+                left_table = this_query.from_tables[left_table]     # get non-alias name
+            if type(this_query.from_tables[left_table]) is str:     # check if left table was part of a join without loading relation
+                left_table = this_query.from_tables[left_table]
+            if left_attr is not None and len(left_attr) > 0:
+                left_attr_index = this_query.from_tables[left_table][1][left_attr]      # determine index of desired attribute
             else:
-                error(" only equality comparison permitted for conditions comparing attribute values from 2 tables.")
-            return return_relation
+                left_attr_index = None
+
+            # right side
+            right_table = join_tup[2]
+            right_attr = join_tup[4]
+            if right_table in this_query.alias:
+                right_table = this_query.from_tables[right_table]   # get non-alias name
+            if type(this_query.from_tables[right_table]) is str:    # check if right table was part of a join without loading relation
+                right_table = this_query.from_tables[right_table]
+            if right_attr is not None and len(right_attr) > 0:
+                right_attr_index = this_query.from_tables[right_table][1][right_attr]   # determine index of desired attribute
+            else:
+                right_attr_index = None
+
+            # determine join type based on the relative sizes of the relations to join
+            ty = join_tup[0]        # get type of join.  This may need to be altered due to outer/inner table swaps
+            left_size = len(this_query.from_tables[left_table][0])
+            right_size = len(this_query.from_tables[right_table][0])
+            nested = False      # default to sort/merge
+            if left_size >= JOIN_MULT*right_size or right_size >= JOIN_MULT*left_size:
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": nested join"
+                nested = True   # if relation sizes are significantly different, use nested loop join
+
+                # determine outer table (the left table) --> switch names, attribute indices, and type of join (left <--> right)
+                if right_size < left_size:      # if smaller table is not the outer table, then flip relation positions
+                    explain_string += ". Table order flipped"
+                    temp_relation = left_table
+                    left_table = right_table
+                    right_table = temp_relation
+
+                    temp_attr = left_attr_index
+                    left_attr_index = right_attr_index
+                    right_attr_index = temp_attr
+
+                    # left/right outer joins are not commutative, so need to flip to keep query the same
+                    if ty == "left":
+                        ty = "right"
+                    elif ty == "right":
+                        ty = "left"
+            else:
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": sort/merge join"
+
+            # determine attribute index dictionary for the result of the join (currently if/else all contain same code.  May change if decide to handle outer joins differently)
+            natural_list = []
+            join_attr_dict = {}
+            if ty == "equi":
+                # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
+                join_attr_dict = this_query.from_tables[left_table][1]
+                attr_offset = len(join_attr_dict)  # + 1 since indexing starts at 0
+                for k in this_query.from_tables[right_table][1]:
+                    attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
+                    if this_query.from_tables[right_table][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
+                        attr_ind -= 1
+                    join_attr_dict[k] = attr_ind
+            elif ty == "natural":
+                # determine attributes shared between tables to be natural joined
+                common_list = []
+                for a1 in list(this_query.from_tables[left_table][1].keys()):
+                    for a2 in list(this_query.from_tables[right_table][1].keys()):
+                        if a1 == a2:    # common attribute found
+                            helper = (this_query.from_tables[left_table][1][a1], this_query.from_tables[right_table][1][a2])
+                            common_list.append(helper[1])   # record common attribute indices in the right table
+                            natural_list.append(helper)
+
+                # concatenate right attributes to left ones.  Drop common attributes from the right relation, as done by join function
+                join_attr_dict = this_query.from_tables[left_table][1]
+                attr_offset = len(join_attr_dict)     # dont need +1 since indexing starts at 0
+                counter = 0     # indexing for right table attributes start at 0.  Must +1 to the counter to avoid giving last attribute of left table and first of the right the same index
+                for k in this_query.from_tables[right_table][1]:
+                    if this_query.from_tables[right_table][1][k] not in common_list:
+                        attr_ind = counter + attr_offset
+                        join_attr_dict[k] = attr_ind        # map string name to index location
+                        counter += 1
+
+            elif ty == "left" or ty == "right" or ty == "full":
+                # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
+                join_attr_dict = this_query.from_tables[left_table][1].copy()
+                attr_offset = len(join_attr_dict)  # doesnt need a +1 since indexing starts at 0
+                for k in this_query.from_tables[right_table][1]:
+                    raw_ind = this_query.from_tables[right_table][1][k]
+                    attr_ind = raw_ind + attr_offset
+                    if raw_ind == right_attr_index:
+                        join_attr_dict[k] = left_attr_index
+                        continue
+                    elif raw_ind > right_attr_index:  # account for the removal of this duplicate attribute
+                        attr_ind -= 1
+                    join_attr_dict[k] = attr_ind
+            else:
+                error(" parsing error. Unrecognized join type in query optimizer.")
+
+            if ty == "full":
+                ty = "outer"    # make compatible with join function
+
+
+            # join and store
+            if ty == "natural" and len(natural_list) < 0:
+                joined_relation = []    # no common attributes, so return an empty relation
+            else:
+                joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0], left_attr_index, right_attr_index, ty, nested, natural_list)
+            join_name = "JOIN_" + left_table + "_" + right_table
+            this_query.from_tables[left_table] = join_name  # now when these are referenced, redirect to join result (this redirects are the only non-alias strings left in from_tables)
+            this_query.from_tables[right_table] = join_name
+
+
+            this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
+
+
+        # remove those ON clause attributes that were maintained to allow joins to work (another round of projections)
+        remove_table = {}
+        for at in attr_to_remove:         # aggregate projections to avoid issues
+            # check table name for aliasing or reference to a join result
+            table = at[0]
+            attribute = at[1]
+            if table in this_query.alias:
+                table = this_query.from_tables[table]
+            if this_query.from_tables[table] is str:
+                table = this_query.from_tables[table]   # table was used in a join.  Use the result from this join
+
+
+            # store attributes to keep in table-specific lists of list of projections and dictionary of attribute indices
+            if table not in remove_table:
+                remove_table[table] = [list(), dict()]
+
+                # determine those attributes to keep in the relation and populate an updated list of indices to keep and dictionary of attribute locations
+                for a in this_query.from_tables[table][1]:
+                    if a != attribute:
+                        attr_index = this_query.from_tables[table][1][a]
+                        remove_table[table][0].append(attr_index)
+                        remove_table[table][1][attr_index] = a          # reverse mapping.  Index --> attribute name
+
+            else:   # if the table entry has already been initialized in remove_table, just remove the attribute that we want to drop
+                remove_table[table][0].pop(remove_table[table][0].index(attribute))
+                remove_table[table][1].pop(attribute)
+
+        # apply projections to table
+        for table in remove_table:
+            indices = list(sorted(remove_table[table][0]))
+            # determine new dict for this relation, resulting from the projection
+            new_attr_dict = {}
+            counter = 0     # this works because indices are sorted and will be projected in this order too
+            for i in indices:
+                new_attr_dict[remove_table[table][1][i]] = counter     # map attr name --> new index in relation
+                counter += 1
+
+            # pass in relation and list of indices to return
+            this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), new_attr_dict)
+            explain_string = explain_string + "\nProjections delayed because needed in ON clause: (" + "".join([str(remove_table[table][1][i]) + ", " for i in indices]) + ") for " + table + " performed."
+
+
+
+    # perform any projections that were delayed due to involvement of that table in an outer join
+    joined_table_attrs = {}
+    for table in projection_tables:
+        if table in outer_tables:  # performing an early projection for an outer join is useless.  Will have to perform projection again later
+            # get the joined relation name
+            joined_table = table
+            while type(this_query.from_tables[joined_table]) is str:
+                joined_table = this_query.from_tables[joined_table]
+
+            if joined_table not in joined_table_attrs:
+                joined_table_attrs[joined_table] = ([], {})     # list to store all indices to keep, dictionary to map indices to names
+
+
+
+            # get the attributes to keep from "table" that are now in the joined table (and their indices in the joined relation
+            for a in this_query.select_attr:
+                if a[0] == table:
+                    ind = this_query.from_tables[joined_table][1][a[1]]
+                    joined_table_attrs[joined_table][0].append(ind)
+                    joined_table_attrs[joined_table][1][ind] = a[1]
+
+
+    # after all tables have been examined, we now know all the attributes to keep from the joined relation.  Give those indices to projection function.  Update dictionaries to reflect this removal
+    for j in [*joined_table_attrs]:     # loop through the keys of joined_table_attrs
+        joined_table_attrs[j] = (list(set(joined_table_attrs[j][0])), joined_table_attrs[j][1])
+
+
+        # determine new dict for this relation, resulting from the projection
+        project_attr_dict = {}
+        counter = 0  # this works because indices are sorted and will be projected in this order too
+        for i in joined_table_attrs[j][0]:
+            project_attr_dict[joined_table_attrs[j][1][i]] = counter  # map attr name --> new index in relation
+            counter += 1
+
+        # pass in relation and list of indices to return
+        this_query.from_tables[j] = (projection(this_query.from_tables[j][0], joined_table_attrs[j][0]), project_attr_dict)
+        l = [*project_attr_dict]
+        li = [l[element] + ", " for element in range(len(l)) if element < (len(l) - 1)]
+        li.append(l[-1])
+        explain_string = explain_string + "\nProjections delayed because table involved in a join: (" + "".join(li) + ") for " + j + " performed."
+
+
+
+    # determine how aggregate operators are used in SELECT clause
+    all_agg = True
+    agg_count = 0
+    for s in this_query.select_attr:
+        if len(s) > 2:
+            agg_count += 1
         else:
-            value = condition.right_operand
-    else:
-        value = condition.left_operand
+            all_agg = False
 
 
-    # perform a standard selection (one table)
-    # loop through relation and perform operation
-    for instance in relation1:
-        if condition.equal:
-            if instance[attr_index1] == value:
-                return_relation.append(instance)
-        elif condition.not_equal:
-            if instance[attr_index1] != value:
-                return_relation.append(instance)
-        elif condition.greater:
-            if instance[attr_index1] > value:
-                return_relation.append(instance)
-        elif condition.less:
-            if instance[attr_index1] < value:
-                return_relation.append(instance)
-        elif condition.great_equal:
-            if instance[attr_index1] >= value:
-                return_relation.append(instance)
-        elif condition.less_equal:
-            if instance[attr_index1] <= value:
-                return_relation.append(instance)
+    # if yes, only output one tuple
+    if agg_count > 0:
+        if all_agg:
+            attr_list = []
+            output_list = []
+            for s in this_query.select_attr:
+                # get proper table name
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
+
+                # calculate aggregate value
+                val = 0
+                if s[2] == "max":
+                    val = max_agg(this_query.from_tables[table_name][0],  this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
+
+                # add to output list
+                attr_list.append(s[2] + "(" + s[1] + ")")
+                output_list.append(val)
+
+            # if now function was specified, include it now
+            if this_query.now:
+                t = time.localtime()
+                current_time = time.strftime("%H:%M:%S", t)
+                attr_list.append("NOW")
+                output_list.append(current_time)
+
+            # output
+            return attr_list, [output_list], explain_string
+
+        # if no, need to alter value to the min/max/avg/sum/count value for that attribute for every tuple in the relation
         else:
-            error(" no operation specified in condition.")
-    return return_relation
-# END select
+            for se in range(len(this_query.select_attr)):
+                s = this_query.select_attr[se]
+                # determine if this select attribute has an aggregate operator
+                if len(s) <= 2:
+                    continue
+
+                # get proper table name
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
+
+                # calculate aggregate value
+                agg_type = s[2]
+                val = -1
+                if agg_type == "max":
+                    val = max_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
+
+                # store value for later application to the table
+                this_query.select_attr[se] = (s[0], s[1], s[2], val)
 
 
 
-# projection function
-# relation is list of lists.  Indexes are the indices of the attributes to include in the returned relation
-def projection(relation, indexes):
-    if type(indexes) is not list:
-        error(" indexes parameter to projection function must be a list of integers.")
-    return_relation = list()
-    for instance in relation:
-        tup = list()
-        for i in indexes:
-            tup.append(instance[i])     # TODO definitely a list function that does this faster
-        return_relation.append(tup)
+            # remove any raw attributes that are no longer needed.  Get correct labels for outputting aggregate attributes
+            # check if attribute itself is needed for the query (check select_attr).  If not needed, overwrite with average value.  Else, append new aggregate value to all tuples
+            remove_list = set()
+            for s in this_query.select_attr:
+                # determine if this select attribute has an aggregate operator
+                if len(s) <= 2:
+                    continue
 
-
-    # TODO remove duplicates
-    return return_relation
-# END projection
-
-
-
-
-# join function (pass a parameter to signify which join to do)  --> need to consider which kind of join in best.  This probably should be handled by the optimizer
-# relation1 and relation2 are list of lists
-# attr1 and attr2 are attribute indexes (specified by ON clause)
-# typ refers to the type of join --> (equi, outer, left, right)  outer refers to full outer join.  Left and right are outer joins
-def join(relation1, relation2, attr1, attr2, typ, nested, natural_list = None):
-
-    #
-    #   TODO add option for other type of join (currently always doing nested loop.  Want to support sort/merge too)
-    #
-    if typ == "natural" and nested == False:
-        # cannot handle sort/merge natural joins on multiple common attributes
-        if len(natural_list) == 1:
-            # refactor as an equijoin
-            typ ="equi"
-            attr1 = natural_list[0][0]
-            attr2 = natural_list[0][1]
-
-        else:
-            # multiple join attributes --> revert to nested loop
-            nested = True
-
-
-    return_relation = []
-    if typ == "equi":       # equi joins
-        if nested:
-            for r1 in relation1:
-                for r2 in relation2:
-                    if r1[attr1] == r2[attr2]:
-                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                        help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-        else:
-            # sort left relation on join attribute
-            relation1 = sorted(relation1, key=lambda x: x[attr1])
-
-            # sort right relation
-            relation2 = sorted(relation2, key=lambda x: x[attr2])
-
-            # scan both tables for matches.  If match found, then add to return relation
-            inner_index = 0       # let relation2 be the inner relation and relation1 be the outer relation
-            outer_index = 0
-            while inner_index < len(relation2) and outer_index < len(relation1):    # while still samples in both relations
-                key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
-                inner_group = []
-                while inner_index < len(relation2) and key == relation2[inner_index][attr2]:    # collects all samples with the given value
-                    inner_group.append(relation2[inner_index])
-                    inner_index += 1
-                outer_group = []
-                while outer_index < len(relation1) and key == relation1[outer_index][attr1]:    # collects all samples with the given value
-                    outer_group.append(relation1[outer_index])
-                    outer_index += 1
-
-                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
-                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-                for r1 in outer_group:
-                    for r2 in inner_group:
-                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                        help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-    elif typ == "natural":
-        if type(natural_list) is not list:
-            error("invalid natural_list in natural join")
-        if type(natural_list[0]) is not tuple:
-            error("invalid natural_list contents in natural join")
-
-        if nested:
-            for r1 in relation1:
-                for r2 in relation2:
-                    # for each pair of samples, look to see if they match on the common attributes passed to the function
-                    match = True
-                    for attr in natural_list:
-                        if r1[attr[0]] != r2[attr[1]]:      # check if values at the common attribute indices are match
-                            match = False
+                keep_raw = False
+                for r in this_query.select_attr:        # looking for matches (need to keep raw if a match exists)
+                    if s != r and r not in remove_list:
+                        if len(r) == 2:      # only look at normal attributes
+                            if r == (s[0], s[1]):
+                                keep_raw = True
+                                break
+                        elif r[:2] == (s[0], s[1]) and r[:2] in remove_list:
+                            keep_raw = True     # the raw attribute that these 2 aggregate operations share has already been overwritten by the first one
                             break
-                    if match:
-                        common_list = [i[1] for i in natural_list]      # take the common attribute indices for the second relation and put into list form
-                        help_list = [r2[r] for r in range(len(r2)) if r not in common_list]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-        else:
-            pass        # TODO ?? with multiple attributes will be hard. Reroute those with one attribute in common to a sort/merge equijoin and only handle multi-attribute natural joins with nested loop
-                        # issues with sorting on an unknown number of attributes
-
-    elif typ == "outer":    # full outer join
-        if nested:
-            found_list = [False for i in range(len(relation2))]
-            for r1 in relation1:
-                count = 0
-                found = False
-                for r2 in relation2:
-                    if r1[attr1] == r2[attr2]:
-                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                        help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-                        found_list[count] = True
-                        found = True
-                    count += 1
-                if not found:
-                    # r1 --> pad back with nulls for the number of attributes in r2-1 (account for shared attribute)
-                    left_helper = r1
-                    for i in range(len(relation2[0]) - 1):  # -1 to account for shared attribute
-                        left_helper.append(None)
-
-                    # add r1 (from left relation) to return relation
-                    return_relation.append(left_helper)
-            for f in range(len(found_list)):
-                if not found_list[f]:
-                    r2 = relation2[f]
-
-                    # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
-                    right_helper = []
-                    for i in range(len(relation1[0])):
-                        if i == attr1:
-                            right_helper.append(r2[attr2])
-                        else:
-                            right_helper.append(None)
-                    for i in range(len(r2)):
-                        if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
-                            right_helper.append(r2[i])
-
-                    # add both r2 (right relation) to return relation
-                    return_relation.append(right_helper)
-        else:
-            # sort left relation on join attribute
-            relation1 = sorted(relation1, key=lambda x: x[attr1])
-
-            # sort right relation
-            relation2 = sorted(relation2, key=lambda x: x[attr2])
-
-            # scan both tables for matches.  If match found, then add to return relation
-            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
-            outer_index = 0
-            while inner_index < len(relation2) or outer_index < len(relation1):  # while still samples in both relations
-                # key selection
-                if inner_index < len(relation2):
-                    if outer_index < len(relation1):
-                        key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
-                    else:
-                        key = relation2[inner_index][attr2]
-                elif outer_index < len(relation1):
-                    key = relation1[outer_index][attr1]
-
-                # find matching tuples
-                inner_group = []
-                while inner_index < len(relation2) and key == relation2[inner_index][attr2]:  # collects all samples with the given value
-                    inner_group.append(relation2[inner_index])
-                    inner_index += 1
-                outer_group = []
-                while outer_index < len(relation1) and key == relation1[outer_index][attr1]:  # collects all samples with the given value
-                    outer_group.append(relation1[outer_index])
-                    outer_index += 1
-
-                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
-                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-                if len(outer_group) > 0 and len(inner_group) > 0:       # if both are non-empty
-                    for r1 in outer_group:
-                        for r2 in inner_group:
-                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                            help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                            helper = r1 + help_list
-                            return_relation.append(helper)
-                else:       # if one is empty, append contents of the other and pad with nulls
-                    for r1 in outer_group:
-                        help_list = [None for r in range(len(relation2[0])-1)]  # -1 to account for shared attribute
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-
-                    for r2 in inner_group:
-                        # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
-                        right_helper = []
-                        for i in range(len(relation1[0])):
-                            if i == attr1:
-                                right_helper.append(r2[attr2])
-                            else:
-                                right_helper.append(None)
-                        for i in range(len(r2)):
-                            if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
-                                right_helper.append(r2[i])
-
-                        # add both r1 and r2 to return relation
-                        return_relation.append(right_helper)
-    elif typ == "left":     # left outer join
-        if nested:
-            for r1 in relation1:
-                found = False
-                for r2 in relation2:
-                    if r1[attr1] == r2[attr2]:
-                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                        help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-                        found = True
-                if not found:
-                    # r1 --> pad back with nulls for the number of attributes in r2-1 (account for shared attribute)
-                    left_helper = r1
-                    for i in range(len(relation2[0])-1):  # -1 to account for shared attribute
-                        left_helper.append(None)
-
-                    # add r1 (from left relation) to return relation
-                    return_relation.append(left_helper)
-        else:
-            # sort left relation on join attribute
-            relation1 = sorted(relation1, key=lambda x: x[attr1])
-
-            # sort right relation
-            relation2 = sorted(relation2, key=lambda x: x[attr2])
-
-            # scan both tables for matches.  If match found, then add to return relation
-            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
-            outer_index = 0
-            while inner_index < len(relation2) or outer_index < len(relation1):  # while still samples in both relations
-                # key selection
-                if inner_index < len(relation2):
-                    if outer_index < len(relation1):
-                        key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
-                    else:
-                        key = relation2[inner_index][attr2]
-                elif outer_index < len(relation1):
-                    key = relation1[outer_index][attr1]
-
-                # find matching tuples
-                inner_group = []
-                while inner_index < len(relation2) and key == relation2[inner_index][attr2]:  # collects all samples with the given value
-                    inner_group.append(relation2[inner_index])
-                    inner_index += 1
-                outer_group = []
-                while outer_index < len(relation1) and key == relation1[outer_index][attr1]:  # collects all samples with the given value
-                    outer_group.append(relation1[outer_index])
-                    outer_index += 1
-
-                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
-                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-                if len(outer_group) > 0 and len(inner_group) > 0:  # if both are non-empty
-                    for r1 in outer_group:
-                        for r2 in inner_group:
-                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                            help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                            helper = r1 + help_list
-                            return_relation.append(helper)
-                else:  # if one is empty, append contents of the other and pad with nulls
-                    for r1 in outer_group:
-                        left_helper = r1
-                        help_list = [None for r in range(len(relation2[0]) - 1)]
-                        left_helper.extend(help_list)  # -1 to account for shared attribute
-                        return_relation.append(left_helper)
-    elif typ == "right":    # right outer join
-        if nested:
-            found_list = [False for i in range(len(relation2))]
-            for r1 in relation1:
-                count = 0       # for indexing found_list
-                for r2 in relation2:
-                    if r1[attr1] == r2[attr2]:
-                        # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                        help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                        helper = r1 + help_list
-                        return_relation.append(helper)
-                        found_list[count] = True
-                    count += 1
 
 
-            for f in range(len(found_list)):
-                if not found_list[f]:
-                    r2 = relation2[f]
-
-                    # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
-                    right_helper = []
-                    for i in range(len(relation1[0])):
-                        if i == attr1:
-                            right_helper.append(r2[attr2])
-                        else:
-                            right_helper.append(None)
-                    for i in range(len(r2)):
-                        if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
-                            right_helper.append(r2[i])
-
-                    # add both r2 (right relation) to return relation
-                    return_relation.append(right_helper)
-        else:
-            # sort left relation on join attribute
-            relation1 = sorted(relation1, key=lambda x: x[attr1])
-
-            # sort right relation
-            relation2 = sorted(relation2, key=lambda x: x[attr2])
-
-            # scan both tables for matches.  If match found, then add to return relation
-            inner_index = 0  # let relation2 be the inner relation and relation1 be the outer relation
-            outer_index = 0
-            while inner_index < len(relation2) or outer_index < len(relation1):  # while still samples in both relations
-                # key selection
-                if inner_index < len(relation2):
-                    if outer_index < len(relation1):
-                        key = min(relation2[inner_index][attr2], relation1[outer_index][attr1])
-                    else:
-                        key = relation2[inner_index][attr2]
-                elif outer_index < len(relation1):
-                    key = relation1[outer_index][attr1]
-
-                # find matches
-                inner_group = []
-                while inner_index < len(relation2) and key == relation2[inner_index][attr2]:  # collects all samples with the given value
-                    inner_group.append(relation2[inner_index])
-                    inner_index += 1
-                outer_group = []
-                while outer_index < len(relation1) and key == relation1[outer_index][attr1]:  # collects all samples with the given value
-                    outer_group.append(relation1[outer_index])
-                    outer_index += 1
-
-                # due to key == statements, contents of i and o match.  Handle left/right joins by adding Nones to the samples of the specific tables (even if no matching in the other table, still include the tuple from the given relation)
-                # Here you can handle left or right join by replacing an empty group with a group of one empty row (None,)*len(row)
-                if len(outer_group) > 0 and len(inner_group) > 0:  # if both are non-empty
-                    for r1 in outer_group:
-                        for r2 in inner_group:
-                            # add all attributes from r2 to r1, except the shared attribute (at index attr2 in r2)
-                            help_list = [r2[r] for r in range(len(r2)) if r != attr2]
-                            helper = r1 + help_list
-                            return_relation.append(helper)
-                else:  # if one is empty, append contents of the other and pad with nulls
-                    for r2 in inner_group:
-                        # r2 --> pad front with nulls for the number of attributes in r1 (place r2[attr2] value in attr1 index)
-                        right_helper = []
-                        for i in range(len(relation1[0])):
-                            if i == attr1:
-                                right_helper.append(r2[attr2])
-                            else:
-                                right_helper.append(None)
-                        for i in range(len(r2)):
-                            if i != attr2:  # add contents of r2 (excluding r2[attr2] it was previously added
-                                right_helper.append(r2[i])
-
-                        # add both r1 and r2 to return relation
-                        return_relation.append(right_helper)
-    else:
-        error(" invalid join type specified")
-
-    return return_relation
-# END join
+                # if table being referenced has been used in a join
+                table = s[0]
+                while type(this_query.from_tables[table]) is str:
+                    table = this_query.from_tables[table]
 
 
+                if keep_raw:
+                    # append aggregate value to each tuple in the relation
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup.append(s[3])
+                        this_query.from_tables[table][0][r] = tup
+
+                    # update the dictionary to reflect this change
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = max(list(this_query.from_tables[table][1].values())) + 1     # take the max index and add 1
+
+                else:
+                    # overwrite original attribute and update dictionary
+                    attr = this_query.from_tables[table][1][s[1]]
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup[attr] = s[3]
+                        this_query.from_tables[table][0][r] = tup
+
+                    # update dictionary (remove the raw value and replace with the aggregate one)
+                    this_query.from_tables[table][1].pop(s[1])
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = attr
+
+                    # add raw to remove_list (avoid trying to remove it twice.  Use s[0] because table may be a join name)
+                    remove_list.add((s[0], s[1]))
 
 
-# aggregate functions (min, max, sum, avg, count).  Given a relation (list of lists) and an attribute index.
-def min_agg(relation, attr_ind):
-    values = [r[attr_ind] for r in relation]
-    return min(values)
+    # update star_tables list to accommodate joins/aliasing
+    for st in range(len(star_tables)):
+        s = star_tables[st]
+        if s in this_query.alias:
+            s = this_query.from_tables[s]
+        while type(this_query.from_tables[s]) == str:
+            s = this_query.from_tables[s]
+        star_tables[st] = s
 
+    # return resulting relation
+    relation = []
 
-def max_agg(relation, attr_ind):
-    values = [r[attr_ind] for r in relation]
-    return max(values)
+    # for each table listed in the select clause, add to relation to be printed (all already have projections applied)
+    tables_to_include = [proj[0] for proj in this_query.select_attr]
+    for tab in range(len(tables_to_include)):
+        table = tables_to_include[tab]
+        if table in this_query.alias:
+            table = tables_to_include[tab] = this_query.from_tables[table]
+        while type(this_query.from_tables[table]) == str:           # get to the table that does not contain a naming link to another relation
+            table = tables_to_include[tab] = this_query.from_tables[table]
+    tables_to_output = list(set(tables_to_include))
 
+    # loop through tables to output.  Get contents of relations and attribute names (in order)                 !!! TODO look into the "in order" stuff, make sure columns get the correct labels !!!
+    attr_out_list = []
+    for ta in range(len(tables_to_output)):
+        local_attr_list = sorted(this_query.from_tables[tables_to_output[ta]][1], key=this_query.from_tables[tables_to_output[ta]][1].get)      # [*this_query.from_tables[tables_to_output[ta]][1]]
+        attr_out_list.extend(local_attr_list)
+        table = this_query.from_tables[tables_to_output[ta]][0]
+        for t in range(len(table)):
+            if ta == 0:     # allows for direct indexing of the relation list below (and allows for all iterations of outer for loop to be the same)
+                relation.append([])
+            tup = table[t]          # get the information from the corresponding tuple of "ta" relation
+            relation[t].extend(tup) # append information to that information already in the relation to be outputted
 
-def avg_agg(relation, attr_ind):
-    values = [r[attr_ind] for r in relation]
-    return sum(values)/len(values)
-
-
-def count_agg(relation):
-    return len(relation)
-
-
-def sum_agg(relation, attr_ind):
-    values = [r[attr_ind] for r in relation]
-    return sum(values)
-
-
-
-
-
-# set operations (given 2 relations, find difference, intersect, or union --> individual function for each)
-# union function
-def union(relation1, relation2):
-    relation = relation1 + relation2
-    relation.sort()
-    return [k for k,_ in itertools.groupby(relation)]
-
-def intersection(relation1, relation2):
-    return [rel for rel in relation1 if rel in relation2]
-
-def difference(relation1, relation2):
-    return [tup for tup in relation1+relation2 if tup not in relation1 or tup not in relation2]
-
-
-# DML insert operation
-def dml_insert(dml_object):
-    # input validation
-    if dml_object.table_name not in TABLES:
-        error("relations must exist to insert.")
-    # access table from global
-    table = TABLES[dml_object.table_name]
-    # further validation
-    if len(dml_object.values) != table.num_attributes:
-        if not table.now or len(dml_object.values) != table.num_attributes-1:       # when "now" is set, user does not have to an attribute value for the "now" attribute
-            error("attributes given don't match the number of attributes in table.")
-
-    # checks type of given input value
-    for i in range(len(dml_object.values)):
-        if type(dml_object.values[i]).__name__ != table.attributes[i].type:
-            error("input value types do not match existing table.")
-
-    # referential integrity check
-    if len(table.foreign_key) > 0:
-        # this is a child table.  Search parent table for a matching value, if not found --> error
-        local_attr = table.storage.attr_loc[table.foreign_key[0]]
-        parent_table = table.foreign_key[1]
-        parent_attr = TABLES[parent_table].storage.attr_loc[table.foreign_key[2]]
-
-        parent_relation = access(TABLES[parent_table])
-        found = False
-        for r in parent_relation:
-            if r[parent_attr] == dml_object.values[local_attr]:
-                found = True
-                break
-
-        if not found:
-            error("cannot insert a value to a child table that does not match the parent table (relational integrity error).")
-
-
-    # check primary key constraints
-    p_key = table.primary_key
-    if p_key != "":
-        # get index of primary key
-        ind = table.storage.attr_loc[p_key]
-
-        # check for an index on the primary key.  If exists, check it
-        if table.storage.index_attr == p_key:
-            if dml_object.values[ind] in table.storage.index:
-                error("cannot insert a sample with a duplicate primary key value.")
-
-        # if no index
-        else:
-            # scan relation, get all primary key values
-            relation = access(table)
-            key_contents = set([k[ind] for k in relation])
-
-            # check there are no duplicates
-            if dml_object.values[ind] in key_contents:
-                error("cannot insert a sample with a duplicate primary key value.")
-
-
-    # add time stamp if "now" is set for this table
-    if table.now:
+    # if now function was specified, include it now
+    if this_query.now:
         t = time.localtime()
         current_time = time.strftime("%H:%M:%S", t)
-        dml_object.values.append(current_time)
+        attr_out_list.append("NOW")
+        for r in range(len(relation)):
+            relation[r].append(current_time)
 
-
-    # inserting
-    if table.storage.index_name == "":
-        write(table, [dml_object.values])
-    else:
-        write_index(table, [dml_object.values])
-# end of DML insert
-
-
-
-
-
-
-# DML update operation
-def dml_update(dml_obj):
-    # evaluate where condition
-    if type(dml_obj.where) is Comparison:
-        update_list = where_dml(dml_obj.where)
-    else:
-        update_list = access(TABLES[dml_obj.table_name])
-
-    # check referential integrity constraints (if parent/child, cannot update referencing/referenced attribute)
-    # parent check
-    referenced_attr = [t[0] for t in TABLES[dml_obj.table_name].child_tables]       # all attributes in this table being referenced by other tables
-    attr_to_update = [c.left_operand for c in dml_obj.set]                          # all attributes being updated by this command
-    if len(intersection(referenced_attr, attr_to_update)) > 0:
-        error("cannot update an attribute referenced by a foreign key (parent table)")
-
-    # child check
-    if len(TABLES[dml_obj.table_name].foreign_key) > 0 and TABLES[dml_obj.table_name].foreign_key[0] in attr_to_update:
-        error("cannot update a foreign key attribute (child table)")
-
-    # determine indices of the tuples to update in the relation
-    index_list = [None for u in range(len(update_list))]
-    rel = access(TABLES[dml_obj.table_name])
-    for u in range(len(update_list)):
-        for r in range(len(rel)):
-            if update_list[u] == rel[r]:
-                index_list[u] = r           # store index of the matching tuple in the stored relation
-                break
-    if None in index_list:
-        error("cannot update non-existent tuples")
-
-    # perform specified changes
-    for u in range(len(update_list)):
-        update_list[u] = function_to_apply(update_list[u], dml_obj)
-
-    # perform correct update (check for an index)
-    if TABLES[dml_obj.table_name].storage.index_name != "":      # index found
-        update_index(TABLES[dml_obj.table_name], update_list, index_list)
-    else:   # no index
-        update(TABLES[dml_obj.table_name], update_list, index_list)
-# END dml_update
+    return attr_out_list, relation, explain_string
+# END optimizer
 
 
 
@@ -1279,300 +564,159 @@ def dml_update(dml_obj):
 
 
 
-#   function_to_apply   (helper function for DML update.  Performs operation specified in the SET clause)
-def function_to_apply(tup, dml_obj):
-    # determine what attribute to update
-    update_attr = TABLES[dml_obj.table_name].storage.attr_loc[dml_obj.set[0].left_operand]
-    orig_attr_type = TABLES[dml_obj.table_name].attributes[update_attr].type
-
-    # determine what operation to perform
-    if "+" in dml_obj.set[0].right_operand:
-        operands = dml_obj.set[0].right_operand.split("+")
-
-        # handle left
-        left_val = None
-        left = operands[0].lstrip().rstrip()
-        if left.isdigit():
-            if len(left.split(".")) > 1:
-                left_val = float(left)
-            else:
-                left_val = int(left)
-        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
-            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
-            left_val = tup[left_ind]
-        else:
-            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
-
-        # handle right
-        right_val = None
-        right = operands[1].lstrip().rstrip()
-        if right.isdigit():
-            if len(right.split(".")) > 1:
-                right_val = float(right)
-            else:
-                right_val = int(right)
-        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
-            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
-            right_val = tup[right_ind]
-        else:
-            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
-
-        # perform update and store result
-        result = left_val + right_val
-        if type(result).__name__ != orig_attr_type:
-            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
-                error("cannot change attribute type.  Invalid result in set clause of DML update")
-        tup[update_attr] = result
-
-    elif "-" in dml_obj.set[0].right_operand:
-        operands = dml_obj.set[0].right_operand.split("-")
-
-        # handle left
-        left_val = None
-        left = operands[0].lstrip().rstrip()
-        if left.isdigit():
-            if len(left.split(".")) > 1:
-                left_val = float(left)
-            else:
-                left_val = int(left)
-        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
-            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
-            left_val = tup[left_ind]
-        else:
-            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
-
-        # handle right
-        right_val = None
-        right = operands[1].lstrip().rstrip()
-        if right.isdigit():
-            if len(right.split(".")) > 1:
-                right_val = float(right)
-            else:
-                right_val = int(right)
-        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
-            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
-            right_val = tup[right_ind]
-        else:
-            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
-
-        # perform update and store result
-        result = left_val - right_val
-        if type(result).__name__ != orig_attr_type:
-            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
-                error("cannot change attribute type.  Invalid result in set clause of DML update")
-        tup[update_attr] = result
-    elif "*" in dml_obj.set[0].right_operand:
-        operands = dml_obj.set[0].right_operand.split("*")
-
-        # handle left
-        left_val = None
-        left = operands[0].lstrip().rstrip()
-        if left.isdigit():
-            if len(left.split(".")) > 1:
-                left_val = float(left)
-            else:
-                left_val = int(left)
-        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
-            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
-            left_val = tup[left_ind]
-        else:
-            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
-
-        # handle right
-        right_val = None
-        right = operands[1].lstrip().rstrip()
-        if right.isdigit():
-            if len(right.split(".")) > 1:
-                right_val = float(right)
-            else:
-                right_val = int(right)
-        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
-            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
-            right_val = tup[right_ind]
-        else:
-            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
-
-        # perform update and store result
-        result = left_val * right_val
-        if type(result).__name__ != orig_attr_type:
-            if orig_attr_type != "int" or type(result).__name__ != "float":  # if original type is an int and result is a float, ignore
-                error("cannot change attribute type.  Invalid result in set clause of DML update")
-        tup[update_attr] = result
-    elif "/" in dml_obj.set[0].right_operand:
-        operands = dml_obj.set[0].right_operand.split("/")
-
-        # handle left
-        left_val = None
-        left = operands[0].lstrip().rstrip()
-        if left.isdigit():
-            if len(left.split(".")) > 1:
-                left_val = float(left)
-            else:
-                left_val = int(left)
-        elif left in TABLES[dml_obj.table_name].storage.attr_loc:
-            left_ind = TABLES[dml_obj.table_name].storage.attr_loc[left]
-            left_val = tup[left_ind]
-        else:
-            error("unrecognized attribute in left operand of SET clause of DML UPDATE.")
-
-        # handle right
-        right_val = None
-        right = operands[1].lstrip().rstrip()
-        if right.isdigit():
-            if len(right.split(".")) > 1:
-                right_val = float(right)
-            else:
-                right_val = int(right)
-        elif right in TABLES[dml_obj.table_name].storage.attr_loc:
-            right_ind = TABLES[dml_obj.table_name].storage.attr_loc[right]
-            right_val = tup[right_ind]
-        else:
-            error("unrecognized attribute in right operand of SET clause of DML UPDATE.")
-
-        # perform update and store result
-        result = left_val / right_val
-        if type(result).__name__ != orig_attr_type:
-            if orig_attr_type != "int" or type(result).__name__ != "float":     # if original type is an int and result is a float, ignore
-                error("cannot change attribute type.  Invalid result in set clause of DML update")
-        tup[update_attr] = result
-    else:
-        quote_list = dml_obj.set[0].right_operand.split("\"")
-        if len(quote_list) == 3:
-            tup[update_attr] = quote_list[1].rstrip().lstrip()
-        else:
-            error("unknown value type in right operand of SET clause in DML update.")
-    return tup
-# END function_to_apply
 
 
 
 
 
 
-# DML delete operation
-def dml_delete(dml_obj):
-    # evaluate where condition (if exists) to get those tuples to be removed
-    remove_tup = where_dml(dml_obj.where)
 
-    # check referential integrity constraints (if this is a parent table, need to apply CASCADE delete to child table)
-    if len(TABLES[dml_obj.table_name].child_tables) > 0:
-        for r in remove_tup:
-            for table in TABLES[dml_obj.table_name].child_tables:
-                child_removals = []
-
-                # find any matches
-                child_relation = access(TABLES[table[1]])
-                child_attr = TABLES[table[1]].storage.attr_loc[table[2]]
-                parent_attr = TABLES[dml_obj.table_name].storage.attr_loc[table[0]]
-                for c_r in range(len(child_relation)):
-                    if r[parent_attr] == child_relation[c_r][child_attr]:
-                        child_removals.append(c_r)
-
-                # remove duplicates (should not be needed, but just in case)
-                child_removals = list(set(child_removals))
-
-                # remove matches (update index if exists)
-                if TABLES[table[1]].storage.index_name != "":
-                    remove_index(TABLES[table[1]], child_removals)
-                elif len(child_removals) > 0:
-                    remove(TABLES[table[1]], child_removals)
-
-
-    # check for index (call appropriate remove function)
-    if TABLES[dml_obj.table_name].storage.index_name != "":
-        remove_index(TABLES[dml_obj.table_name], remove_tup)
-    else:
-        remove(TABLES[dml_obj.table_name], remove_tup)
-# END dml_delete
-
-
-
-
-
-
-# where_dml        as of now --> only applies results to tables when ret = False (should only occur for top-level function call)
-def where_dml(cond):
+# where_evaluate        as of now --> only applies results to tables when ret = False (should only occur for top-level function call)
+def where_evaluate(this_query, cond, ret=False):
     if type(cond.left_operand) is tuple:
         if type(cond.right_operand) is tuple:  # essentially an equi-join
-            error("only accepting simple WHERE clauses in dml operations.")
+            # left side
+            left_table_name = cond.left_operand[0]
+            left_attr = cond.left_operand[1]
+
+            if left_table_name in this_query.alias:  # aliases should still map to strings
+                left_table_name = this_query.from_tables[left_table_name]  # get non-alias name in order to get access to stored relation
+            if type(this_query.from_tables[left_table_name]) is str:
+                left_table_name = this_query.from_tables[left_table_name]  # left table was part of a join. Use result of a join
+            left_attr_index = this_query.from_tables[left_table_name][1][left_attr]     # determine index of desired attribute
+
+
+            # right side
+            right_table_name = cond.right_operand[0]
+            right_attr = cond.right_operand[1]
+
+            if right_table_name in this_query.alias:
+                right_table_name = this_query.from_tables[right_table_name]  # get non-alias name in order to get access to stored relation
+            if type(this_query.from_tables[right_table_name]) is str:
+                right_table_name = this_query.from_tables[right_table_name]  # left table was part of a join. Use result of a join
+            right_attr_index = this_query.from_tables[right_table_name][1][right_attr]  # determine index of desired attribute
+
+
+            # call selection function (storing equijoin result here)  after this point any references to tables that compose the join should direct to the corresponding attribute in this table
+            join_name = "JOIN_" + left_table_name + "_" + right_table_name
+
+            # this will always be an equijoin, so just update the attribute dictionary here (append attributes of right table to those of the left, removing the right index attribute (shared with the left))
+            # updating the dictionary of indices for the result of this join
+            join_attr_dict = this_query.from_tables[left_table_name][1]
+            attr_offset = len(this_query.from_tables[left_table_name][1]) + 1  # + 1 since indexing starts at 0
+            for k in this_query.from_tables[right_table_name][1]:
+                attr_ind = this_query.from_tables[right_table_name][1][k] + attr_offset
+                if this_query.from_tables[right_table_name][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
+                    attr_ind -= 1
+                join_attr_dict[k] = attr_ind
+
+            joined_relation = selection(this_query.from_tables[left_table_name][0], this_query.from_tables[right_table_name][0],
+                                        cond, left_attr_index, right_attr_index)
+
+            # make joined tabled reference the joined result.  Store joined relation and attribute dictionary
+            this_query.from_tables[left_table_name] = join_name  # now when these are referenced, redirect to join result (this redirects are the only non-alias strings left in from_tables)
+            this_query.from_tables[right_table_name] = join_name
+            this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
+
+            if ret:
+                return joined_relation, join_attr_dict, [left_table_name, right_table_name]
+
         else:  # type(cond.left_operand) is tuple
             # determine table
             table = cond.left_operand[0]
             attr = cond.left_operand[1]
 
+            if table in this_query.alias:
+                table = this_query.from_tables[table]  # get non-alias name in order to get access to stored relation
+            if type(this_query.from_tables[table]) is str:
+                table = this_query.from_tables[table]
+
             # determine index of desired attribute
-            attr_index = TABLES[table].storage.attr_loc[attr]
-            return selection(access(TABLES[table]), None, cond, attr_index, None)
+            attr_index = this_query.from_tables[table][1][attr]
+
+            # call selection function
+            dic = this_query.from_tables[table][1]
+
+            if ret:
+                return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
+            else:
+                this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
+
     elif type(cond.right_operand) is tuple:
         # determine table
         table = cond.right_operand[0]
         attr = cond.right_operand[1]
 
+        if table in this_query.alias:
+            table = this_query.from_tables[table]  # get non-alias name in order to get access to stored relation
+
         # determine index of desired attribute
-        attr_index = TABLES[table].storage.attr_loc[attr]
-        return selection(access(TABLES[table]), None, cond, attr_index, None)
+        attr_index = this_query.from_tables[table][1][attr]
+
+        # call selection function
+        dic = this_query.from_tables[table][1]
+        if ret:
+            return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
+        else:
+            this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
     elif cond.and_ or cond.or_:  # compound query
         result_relation = []
         attr_dict = {}
         if cond.and_:
-            left = where_dml(cond.left_operand)
-            right = where_dml(cond.right_operand)
-        else:  # cond._or
-            left = where_dml(cond.left_operand)
-            right = where_dml(cond.right_operand)
-        return result_relation
+            left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
+            right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
+            if left_dict == right_dict:
+                result_relation = intersection(left, right)
+                attr_dict = left_dict
+            else:
+                # occurs when operands do not both operate on the same table.  As a result, store those that meet the respective conditions (may not be the right answer for more complex conditions)
+                if ret:     # ret means we are at an internal node of the tree of conditions, if so this solution may produce incorrect solutions (ex. if level above this is an or)
+                    error("dictionaries do not match.  Cannot perform intersection operation.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                    # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+
+                    return      # allowing function to terminate normally will overwrite the changes made here
+
+        else:   # cond._or
+            left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
+            right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
+            if left_dict == right_dict:
+                result_relation = union(left, right)
+                attr_dict = left_dict
+            else:
+                # occurs when operands do not both operate on the same table.  As a result, store those that meet the respective conditions (may not be the right answer for more complex conditions)
+                if ret:  # ret means we are at an internal node of the tree of conditions, if so this solution may produce incorrect solutions (ex. if level above this is an or)
+                    error("dictionaries do not match.  Cannot perform union operation.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                        # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+
+                    return      # allowing function to terminate normally will overwrite the changes made here
+
+
+        # apply results to affected tables
+        total_affected = list(set(affected_left + affected_right))   # combine lists and remove duplicates
+        if ret:
+            return result_relation, left_dict, total_affected
+        else:
+            for table in total_affected:
+                if this_query.from_tables[table] is str:  # essentially, if table was used in a join.  No aliases should make it to here
+                    table = this_query.from_tables[table]
+                this_query.from_tables[table] = (result_relation, attr_dict)
     else:
         error(" no valid comparison does not use at least one table attribute.")
-# END where_dml
-
-
-
-#
-#   High level function
-#
-# initializer
-def initializer():
-    # rel-i-i-1000
-    table1 = create_table("i-i-thousand", [("id", "int"), ("a", "int")])
-    inp_list = [[i, i] for i in range(1, 1001)]
-    write(table1, inp_list)
-
-
-    # rel-i-1-1000
-    table2 = create_table("i-1-thousand", [("id", "int"), ("b", "int")])
-    inp_list = [[i, 1] for i in range(1, 1001)]
-    write(table2, inp_list)
-
-
-
-    # rel-i-i-10000
-    table3 = create_table("i-i-ten_thousand", [("id", "int"), ("c", "int")])
-    inp_list = [[i, i] for i in range(1, 10001)]
-    write(table3, inp_list)
-
-
-
-
-    # rel-i-1-10000
-    table4 = create_table("i-1-ten_thousand", [("id", "int"), ("d", "int")])
-    inp_list = [[i, 1] for i in range(1, 10001)]
-    write(table4, inp_list)
-
-
-    #                           #
-    #   Potential extra credit  #
-    #                           #
-    # rel-i-i-100000
-    table5 = create_table("i-i-hundred", [("id", "int"), ("e", "int")])
-    inp_list = [[i, i] for i in range(1, 100001)]
-    write(table5, inp_list)
-
-
-
-    # rel-i-i-100000
-    table6 = create_table("i-1-hundred", [("id", "int"), ("f", "int")])
-    inp_list = [[i, 1] for i in range(1, 100001)]
-    write(table6, inp_list)
+# END where_evaluate
 
 
 
@@ -1581,33 +725,162 @@ def initializer():
 
 
 
+# find where clause in an and.  Access early if possible and alter select tree to reflect this
+def where_access(this_comparison, this_query, explain_string):
+    if this_comparison is None:
+        return False
 
-    #   Smaller test tables
+    if this_comparison.and_:
+        left_prune = False
+        right_prune = False
 
-    # # tables
-    # table1 = TABLES["test1_rel"]
-    # table2 = TABLES["test2_rel"]
-    #
-    #
-    # # write to tables
-    # inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
-    # write(table1, inp)
-    # table1.foreign_key = ("name", "test2_rel", "name")
-    # table1.primary_key = "name"
-    #
-    # # table 2
-    # inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
-    # table2.child_tables.append(("name", "test1_rel", "name"))
-    # table2.primary_key = "name"
-    # write(table2, inp2)
+        # handle left subtree
+        if this_comparison.left_operand.leaf and this_comparison.left_operand.equal:
+            remove_and = False
+            keep_left = True
+            keep_right = True
+            cond = this_comparison.left_operand
+            left = type(cond.left_operand) is tuple
+            right = type(cond.right_operand) is tuple
+
+            # if one of the operands is a tuple and the other is not
+            if left and not right:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.left_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+                    try:
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name),
+                                                                        TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_left = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+            elif right and not left:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.right_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+                    try:
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand,
+                                     TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_right = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+
+            # determine how to prune this branch
+            if remove_and:
+                if not keep_right:
+                    if not keep_left:
+                        return False    # tell parent to remove this branch entirely
+                    else:
+                        # copy contents of left_operand into this_comparison
+                        this_comparison.copy(this_comparison.left_operand)
+                elif not keep_left:
+                    # copy contents of right_operand into this_comparison
+                    this_comparison.copy(this_comparison.right_operand)
+        else:
+            if not where_access(this_comparison.left_operand, this_query, explain_string):
+                left_prune = True
 
 
+        # handle right subtree
+        if this_comparison.right_operand.leaf and this_comparison.right_operand.equal:
+            remove_and = False
+            keep_left = True
+            keep_right = True
+            cond = this_comparison.right_operand
+            left = type(cond.left_operand) is tuple
+            right = type(cond.right_operand) is tuple
 
-# END initializer
+            # if one of the operands is a tuple and the other is not
+            if left and not right:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.left_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+                    try:
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_left = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+            elif right and not left:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.right_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+                    try:
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_right = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+
+            # determine how to prune this branch
+            if remove_and:
+                if not keep_right:
+                    if not keep_left:
+                        return False  # tell parent to remove this branch entirely
+                    else:
+                        # copy contents of left_operand into this_comparison
+                        this_comparison.copy(this_comparison.left_operand)
+                elif not keep_left:
+                    # copy contents of right_operand into this_comparison
+                    this_comparison.copy(this_comparison.right_operand)
+        else:
+            if not where_access(this_comparison.right_operand, this_query, explain_string):
+                right_prune = True
 
 
+        # handle parent-level pruning
+        if right_prune:
+            if left_prune:
+                return False    # both left and right branches should be pruned. Tell parent that this entire branch is no longer needed
+            else:
+                # right branch no longer needed. Substitute in the left branch
+                this_comparison.copy(this_comparison.left_operand)
+                return True
+        elif left_prune:
+            # left branch no longer needed. Substitute in the right branch
+            this_comparison.copy(this_comparison.right_operand)
+            return True
+        else:
+            return True     # no parent-level pruning needed
 
+    elif this_comparison.equal and this_comparison.leaf:    # this only happens if is initially only one condition exists in the where clause
 
+        #   select i-i-hundred.id from i-i-hundred  as i natural join i-1-hundred  as one natural join i-i-thousand where (i-i-thousand.id = 30)
+        evaluated = False
+        left = type(this_comparison.left_operand) is tuple
+        right = type(this_comparison.right_operand) is tuple
 
+        # if one of the operands is a tuple and the other is not
+        if left and not right:
+            # check for an index on this attribute
+            table_name = this_query.from_tables[this_comparison.left_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.left_operand[1]:
+                try:
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access_index(TABLES[table_name], this_comparison.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
+                except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+        elif right and not left:
+            # check for an index on this attribute
+            table_name = this_query.from_tables[this_comparison.right_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.right_operand[1]:
+                try:
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access_index(TABLES[table_name], this_comparison.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
+                except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+        # determine how to prune this branch
+        if evaluated:       # if condition has been evaluated, remove it
+            return False
+        else:
+            return True
 
-
+    else:
+        return True     # who knows whats in this condition, leave in tree for later evaluation
+# END where_list
