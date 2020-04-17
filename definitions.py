@@ -29,6 +29,7 @@ class Table:
         self.primary_key = ""
         self.foreign_key = tuple()      # format: (local_attr, parent table, parent attribute)
         self.child_tables = []          # list of tuples: (local_attribute, child table, child attribute)
+        self.now = False
 # END Table class
 
 
@@ -59,6 +60,7 @@ class Query:
         self.union = False
         self.intersect = False
         self.difference = False
+        self.now = False
         self.left_query = object()   # Query reference
         self.right_query = object()  # Query reference
 
@@ -144,6 +146,7 @@ class DDL:
     def __init__(self):
         self.table = False      # set to false to signify INDEX  (initialized to a placeholder value)
         self.create = False     # set to false to signify DROP
+        self.now = False        # whether to record time for each insert to the table
 
         self.table_name = ""
         self.index_name = ""
