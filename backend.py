@@ -662,7 +662,6 @@ def create_table(table_name, attr):
             attr_obj.type = at[1]       # index 1 of the tuple is attribute type (a string)
         table.attributes.append(attr_obj)
 
-
     # create storage structure for this relation
     create_relation_storage(table, STORAGE_DIR)
 
@@ -1166,7 +1165,8 @@ def dml_insert(dml_object):
     table = TABLES[dml_object.table_name]
     # further validation
     if len(dml_object.values) != table.num_attributes:
-        error("attributes given don't match the number of attributes in table.")
+        if not table.now or len(dml_object.values) != table.num_attributes-1:       # when "now" is set, user does not have to an attribute value for the "now" attribute
+            error("attributes given don't match the number of attributes in table.")
 
     # checks type of given input value
     for i in range(len(dml_object.values)):
@@ -1191,6 +1191,33 @@ def dml_insert(dml_object):
             error("cannot insert a value to a child table that does not match the parent table (relational integrity error).")
 
 
+    # check primary key constraints
+    p_key = table.primary_key
+    if p_key != "":
+        # get index of primary key
+        ind = table.storage.attr_loc[p_key]
+
+        # check for an index on the primary key.  If exists, check it
+        if table.storage.index_attr == p_key:
+            if dml_object.values[ind] in table.storage.index:
+                error("cannot insert a sample with a duplicate primary key value.")
+
+        # if no index
+        else:
+            # scan relation, get all primary key values
+            relation = access(table)
+            key_contents = set([k[ind] for k in relation])
+
+            # check there are no duplicates
+            if dml_object.values[ind] in key_contents:
+                error("cannot insert a sample with a duplicate primary key value.")
+
+
+    # add time stamp if "now" is set for this table
+    if table.now:
+        t = time.localtime()
+        current_time = time.strftime("%H:%M:%S", t)
+        dml_object.values.append(current_time)
 
 
     # inserting
@@ -1500,61 +1527,9 @@ def where_dml(cond):
 
 
 
-
-# output
-def output(relation, attr_list):
-    # create table
-    output_table = PrettyTable()
-
-    # input attribute names
-    output_table.field_names = attr_list
-
-    # for loop adds all rows neeeded
-    iter_relation = iter(relation)
-    for lis in iter_relation:
-        output_table.add_row(lis)
-
-    print(output_table)
-# end of output
-
-
-
-
-
 #
 #   High level function
 #
-# task manager function.  Takes output from optimizer and calls necessary backend functions to execute the query
-def task_manager(query):
-
-    # tables
-    table1 = TABLES["test1_rel"]
-    table2 = TABLES["test2_rel"]
-
-
-    # write to tables
-    inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
-    write(table1, inp)
-    table1.foreign_key = ("name", "test2_rel", "name")
-    table1.primary_key = "name"
-
-    # table 2
-    inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
-    table2.child_tables.append(("name", "test1_rel", "name"))
-    table2.primary_key = "name"
-    write(table2, inp2)
-
-# END task_manager
-
-
-
-
-
-
-
-
-
-
 # initializer
 def initializer():
     # rel-i-i-1000
@@ -1598,7 +1573,38 @@ def initializer():
     table6 = create_table("i-1-hundred", [("id", "int"), ("f", "int")])
     inp_list = [[i, 1] for i in range(1, 100001)]
     write(table6, inp_list)
+
+
+
+
+
+
+
+
+
+    #   Smaller test tables
+
+    # # tables
+    # table1 = TABLES["test1_rel"]
+    # table2 = TABLES["test2_rel"]
+    #
+    #
+    # # write to tables
+    # inp = [["andrew", 21, 1999], ["bob", 83, 1800], ["daniel", 34, 1500]]
+    # write(table1, inp)
+    # table1.foreign_key = ("name", "test2_rel", "name")
+    # table1.primary_key = "name"
+    #
+    # # table 2
+    # inp2 = [["andrew", 400, "new york"], ["bob", 350, "dc"], ["joe", 200, "seattle"]]
+    # table2.child_tables.append(("name", "test1_rel", "name"))
+    # table2.primary_key = "name"
+    # write(table2, inp2)
+
+
+
 # END initializer
+
 
 
 
