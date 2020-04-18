@@ -3,33 +3,11 @@
 #                                       #
 
 
-
 # import statements
 from definitions import *
 from backend import access, create_index, delete_index, create_table, drop_table, selection, projection, join, dml_delete, dml_update, dml_insert, initializer
 from parser import parser_main
 from optimizer import optimizer
-
-
-
-#           #
-#   TODO    #
-#           #
-#   *** Features to add ***
-#   Support multiple foreign keys for each table
-
-#   add comments, make code readable
-#   add usage specifications (how to use now function, what where conditions are supported and what is not, limitations on DML where clauses, etc)
-
-
-
-
-# note on NOW usage:  can specify "now()" in a query and get current time added to each returned tuple.  Can specify "now" without a datatype as an attribute in a create table
-#       and the time of each insertion will be recorded automatically.  When writing DML insert command, need to specify the now attribute (placed at the end of attribute list)
-#       but do not specify a value for the now attribute as it will be filled in by the system
-
-
-
 
 
 #       *** Sample inputs ***
@@ -42,13 +20,10 @@ from optimizer import optimizer
 
 
 
-
-
-
 # main function
 def main():
+    # initialize database with the provided tables
     optimize = False
-    # initialize the database
     init_start = time.time()
     initializer()
     init_end = time.time()
@@ -57,11 +32,11 @@ def main():
     # start infinite input loop
     keep_looping = True
     while keep_looping:
-        # take line of input
         try:
+            # take line of input
             inp_line = input("\n>>>\t")
 
-            # check for loop termination
+            # check for loop termination and optimization settings
             if inp_line == "exit":
                 keep_looping = False
             elif inp_line == "optimize_on":
@@ -69,14 +44,12 @@ def main():
             elif inp_line == "optimize_off":
                 optimize = False    # turn on pretty output
             else:
-                # start query timer
+                # call parser on line of input and start query timer
                 start = time.time()
-
-                # call parser on line of input
                 parsed_obj = parser_main(inp_line)
 
+                # determine command type and call appropriate functions
                 if type(parsed_obj) is Query:
-
                     # call optimizer on query output from the parser
                     attr_list, resulting_relation, explain_string = optimizer(parsed_obj)
 
@@ -88,22 +61,28 @@ def main():
 
                     print("\nExplain:", explain_string, "\n")
 
-                # call appropriate DDL/DML command
+
                 elif type(parsed_obj) is DML:
+                    # call appropriate DML function
                     if parsed_obj.insert:
                         dml_insert(parsed_obj)
                     elif parsed_obj.delete:
                         dml_delete(parsed_obj)
                     else:   # update
                         dml_update(parsed_obj)
-                else:   # DDL
+                else:
+                    # call appropriate DDL function
                     if parsed_obj.create:
                         if parsed_obj.table:
+                            # create table
                             create_table(parsed_obj.table_name, parsed_obj.attr)
+
+                            # additional adjustments to the table to avoid the need to pass in the entire object.  Set up relational integrity and NOW functionality
                             TABLES[parsed_obj.table_name].primary_key = parsed_obj.primary_key
                             TABLES[parsed_obj.table_name].foreign_key = parsed_obj.foreign_key
 
-                            if parsed_obj.now:      # if specified, tack on the "now" field to the end of the tuple
+                            # if now specified, append to relation schema
+                            if parsed_obj.now:
                                 TABLES[parsed_obj.table_name].now = True
                                 a = Attribute()
                                 a.name = "now"
@@ -122,22 +101,23 @@ def main():
                                 child_table = parsed_obj.table_name
                                 TABLES[foreign_table].child_tables.append((foreign_attr, child_table, child_attr))
                         else:
+                            # create index on specified table
                             create_index(TABLES[parsed_obj.table_name], parsed_obj.index_name, parsed_obj.attr[0])
-                    else:   # drop
+                    else:
                         if parsed_obj.table:
+                            # drop table
                             drop_table(TABLES[parsed_obj.table_name])
                         else:
+                            # drop index on specified table
                             delete_index(TABLES[INDEX[parsed_obj.index_name]], parsed_obj.index_name)
 
+                # end query timer
                 end = time.time()
                 print("Query durations (sec): ", end-start)
+        # allow recovery from errors
         except ValueError:
-            pass        # allow recovery from errors
-    # end infinite input loop
-
+            pass
 # END main
-
-
 
 
 
