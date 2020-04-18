@@ -10,14 +10,14 @@ import tabulate as t
 
 
 # constants/global variables
-TABLES = {}     # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
-INDEX = {}      # map index name to table name.  Index stored in that table
+TABLES = {}         # dictionary of Table objects.      TODO this should be declared in main driver program... here temporarily
+INDEX = {}          # map index name to table name.  Index stored in that table
 STORAGE_DIR = "/Users/andrewstange/Desktop/Spring_2020/COSC280/dbms_proj/backend/storage/"
-JOIN_MULT = 1.5   # value multiplied by number of tuples in a table to determine if join should be nested loop or sort/merge
+JOIN_MULT = 1.5     # value multiplied by number of tuples in a table to determine if join should be nested loop or sort/merge
 
 
 # Class declaration/definitions
-# Table class   (not specific to parser.  Should be in main driver file)
+# Table class
 class Table:
     def __init__(self):
         self.name = ""
@@ -35,11 +35,11 @@ class Table:
 
 
 
-# Attribute class   (not specific to parser.  Should be in main driver file)
+# Attribute class
 class Attribute:
     def __init__(self):
         self.name = ""
-        self.type = ""          # string containing the type of this attribute
+        self.type = ""
 # END Attribute class
 
 
@@ -48,15 +48,14 @@ class Attribute:
 # Query class
 class Query:
     def __init__(self):
-        ### object attributes ###
-        self.select_attr = []       # give as tuple of (table name, attr name) --> only one table in from then table name can be ""
+        # object attributes
+        self.select_attr = []       # give as tuple of (table name, attr name)
         self.from_tables = {}       # use alias/table name as key --> maps to table name (simplifies parsing)
-        self.where = []             # TODO backend says [], parser says object()
+        self.where = []
         self.alias = set()
         self.num_tables = 0
 
-        ### add new flags/variables as needed here.  These flags will be interpreted by the backend ###
-        # handle compound (? unsure proper term) queries here
+        # add new flags/variables as needed here.  These flags will be interpreted by the backend
         self.union = False
         self.intersect = False
         self.difference = False
@@ -64,7 +63,7 @@ class Query:
         self.left_query = object()   # Query reference
         self.right_query = object()  # Query reference
 
-        # aggregate operators.  For each supported operator maintain a list of indices (of select attr list) to apply that operator to
+        # aggregate operators
         self.max = []
         self.min = []
         self.avg = []
@@ -86,7 +85,7 @@ class Comparison:
         self.left_operand = object()
         self.leaf = False
 
-        # operations ...  (can include IN/BETWEEN later?)
+        # operations
         self.and_ = False
         self.or_  = False
         self.equal = False
@@ -98,12 +97,12 @@ class Comparison:
         self.assignment = False     # only to be used in support of UPDATE DML command
 
     def copy(self, comp):
-        # operands  (breaking comparisons into trees of comparisons allows for more complex+nested comparisons)
+        # operands
         self.right_operand = comp.right_operand
         self.left_operand = comp.left_operand
         self.leaf = comp.leaf
 
-        # operations ...  (can include IN/BETWEEN later?)
+        # operations
         self.and_ = comp.and_
         self.or_  = comp.or_
         self.equal = comp.equal
@@ -131,7 +130,7 @@ class DML:
         self.values = []
 
         # update
-        self.set = []   # empty list of Comparison objects.  Set assignment = True
+        self.set = []   # empty list of Comparison objects. assignment = True
 
         # update and delete
         self.where = object()   # placeholder until filled with a Comparison object by parser
@@ -150,31 +149,33 @@ class DDL:
 
         self.table_name = ""
         self.index_name = ""
-        self.attr = []      # list of tuples of (attribute name, data type)
+        self.attr = []          # list of tuples of (attribute name, data type)
         self.primary_key = ""
         self.foreign_key = tuple()
+# END DDL class
 
 
 
 
 
 
-#   Additional classes needed for use in backend
 # Storage class
 class Storage:
     def __init__(self):
         self.filename = ""
         self.num_tuples = 0
-        self.index = {}     # index is a hashmap of key --> location in file.  Can be a list of locations in the file if index not on a key
+        self.index = {}         # index is a hashmap of key --> location in file.  Can be a list of locations in the file if index not on primary key
         self.index_attr = ""    # store name of attribute that the index is on
         self.index_name = ""
-        self.attr_loc = {}  # should map attribute name to index of attribute in a given tuple
+        self.attr_loc = {}      # should map attribute name to index of attribute in a given tuple
+# END Storage class
 
 
 
 
 
-# standardized error function  --> should be in main driver program ... here temporarily
+
+# standardized error function
 def error(st=" parsing error. Invalid syntax or input."):
     print("\nERROR: ", st)
     raise ValueError
