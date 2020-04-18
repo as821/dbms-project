@@ -76,7 +76,7 @@ def parser_main(inp_line):
                     temp = val_list[0].split(",")
                     for i in temp:
                         helper = i.rstrip().lstrip()
-                        if helper.isdigit():
+                        if helper.replace(".", "").isdigit():
                             if len(helper.split(".")) != 1:
                                 dml_obj.values.append(float(helper))
                             else:
@@ -123,14 +123,14 @@ def parser_main(inp_line):
 
                 # determine data types of operands and clear of whitespace
                 left = operands[0].lstrip().rstrip()
-                if left.isdigit():
+                if left.replace(".", "").isdigit():
                     error(" attribute being assigned must be on the left side")
                 else:
                     this_comp.left_operand = left
                     if left not in TABLES[table_name].attribute_names:
                         error(" cannot update a non-existent attribute.")
                 right = operands[1].lstrip().rstrip()
-                if right.isdigit():
+                if right.replace(".", "").isdigit():
                     if len(right.split(".")) == 2:
                         this_comp.right_operand = float(right)
                     else:
@@ -945,7 +945,7 @@ def parse_where(this_query, where_clause):
             operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
         for operand in range(len(operand_list)):
             # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
-            if operand_list[operand].isdigit():
+            if operand_list[operand].replace(".", "").isdigit():
                 if '.' in operand_list[operand]:
                     helper = float(operand_list[operand])
                 else:
@@ -1107,14 +1107,14 @@ def parse_where_dml(this_query, where_clause):
             operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
         for operand in range(len(operand_list)):
             # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
-            if operand_list[operand].isdigit():
+            if operand_list[operand].replace(".", "").isdigit():
                 if '.' in operand_list[operand]:
                     helper = float(operand_list[operand])
                 else:
                     helper = int(operand_list[operand])
             else:   # operand is a name of something (not a number)
                 attr_list = operand_list[operand].split(".")
-                if operand_list[operand].lstrip().rstrip().isdigit():
+                if operand_list[operand].replace(".", "").lstrip().rstrip().isdigit():
                     if len(attr_list) > 1:
                         helper = float(operand_list[operand])
                     else:
