@@ -1,957 +1,564 @@
-#                                           #
-#   COSC 280 DBMS Project       parser.py   #
-#                                           #
+#                                               #
+#   COSC 280 Project 2      optimizer.py        #
+#                                               #
 
 
-
+# import statements
 from definitions import *
+from backend import access, selection, projection, join, union, difference, intersection, max_agg, min_agg, avg_agg, sum_agg, count_agg, access_index
 
 
 
+# optimizer function
+def optimizer(this_query):
+    explain_string = ""
 
-def parser_main(inp_line):  # parameter
-    inp_line = inp_line.lower()
+    #                               #
+    #   Handle non-atomic queries   #
+    #                               #
+    if this_query.union or this_query.intersect or this_query.difference:
+        # perform both subqueries
+        left_list, left, left_ex = optimizer(this_query.left_query)
+        right_list, right, right_ex = optimizer(this_query.right_query)
+        explain_string += left_ex
+        explain_string += right_ex
+
+        # perform specified set operation
+        result = []
+        if this_query.union:
+            result = union(left, right)
+        elif this_query.intersect:
+            result = intersection(left, right)
+        else:   # this_query.difference
+            result = difference(left, right)
+
+        # determine naming of output attributes
+        max_len = max(len(left_list), len(right_list))
+        out_list = []
+
+        # merge attribute names
+        for i in range(max_len):
+            # determine if attributes overlap
+            l = False
+            r = False
+            if i < len(left_list):
+                l = True
+            if i < len(right_list):
+                r = True
+
+            # logic for merging lists of attributes
+            if l and r:
+                if left_list[i] == right_list[i]:
+                    name = left_list[i]
+                else:
+                    name = left_list[i] + "/" + right_list[i]
+            elif l:
+                name = left_list[i]
+            elif r:
+                name = right_list[i]
+            out_list.append(name)
+
+        return out_list, result, explain_string
+    # END non-atomic query handling
 
 
-    # classify as DDL or DML --> search for SELECT (a query), INSERT/UPDATE/DELETE (DML), CREATE/DROP (DDL)
-    query = False
-    dml = False
-    ddl = False
-    if "select " in inp_line:
-        query = True
-    elif "insert " in inp_line or "update " in inp_line or "delete " in inp_line:
-        dml = True
-    elif "create " in inp_line or "drop " in inp_line:
-        ddl = True
+
+    #                                           #
+    #   Load relations and perform selections   #
+    #                                           #
+    # perform early selections (only those that can be accessed with an index)
+    if not where_access(this_query.where, this_query, explain_string):
+        # tree of comparisons is not longer needed, all comparisons have been performed
+        this_query.where = None
+
+    # access remaining tables (those that could not be accessed with an index)
+    for key in this_query.from_tables:
+        if key not in this_query.alias:
+            if type(this_query.from_tables[key]) == str:
+                # only load self-referential table names
+                if this_query.from_tables[key] == key:
+                    this_query.from_tables[key] = (access(TABLES[key]), TABLES[key].storage.attr_loc.copy())
+
+    # perform remaining selections
+    if this_query.where is not None:    # if conditions left to evaluate
+        where_evaluate(this_query, this_query.where, ret=False)
+        explain_string += "\nAll selections performed"
 
 
 
-    # perform query-specific operations
-    if query:
-        # parse query and return result
-        return parse_query(Query(), inp_line)
+    #                                                               #
+    #   Perform early projections (those that won't impact a join)  #
+    #                                                               #
+    # determine tables involved in a join (do not perform projections for those tables early)
+    outer_tables = []
+    for j in this_query.joins:
+        outer_tables.append(j[1])
+        outer_tables.append(j[2])
+    outer_tables = list(set(outer_tables))      # remove duplicates
 
-    elif dml:
-        # create DML object
-        dml_obj = DML()
+    # perform projections (gather all projections for each table and then perform all projections at once)
+    projection_tables = {}
+    for proj in this_query.select_attr:
+        # determine table name of attribute in select clause
+        if this_query.num_tables == 1:
+            table_keys = [*this_query.from_tables]
+            table = table_keys[0]
+            if table in this_query.alias:
+                table = this_query.from_tables[table]
 
-        # classify what type of DML
-        if "insert " in inp_line:
-            dml_obj.insert = True
-            # break into table name (and potentially columns) and list of values  --> use INTO and VALUES as delimiters
-            l = re.split(" values ", inp_line)
-            if len(l) != 2:
-                error(" invalid insert syntax.")
-            li = re.split(" into ", l[0])
-            if len(li) != 2:
-                error(" invalid insert syntax")
-            table_name_attr = li[1].split("(")
-            value_list = l[1].split("(")
+        else:
+            table = proj[0]
+
+            # check if table has been included in a join
+            if type(this_query.from_tables[table]) is str:
+                table = this_query.from_tables[table]
+
+        # if *, dont perform projections
+        if proj[1] == '*':
+            continue
+
+        # determine attribute index in table
+        attr_index = this_query.from_tables[table][1][proj[1]]
+
+        # store attribute in table-specific lists of tuples storing a list of projections and a dictionary of attribute indices
+        if table not in projection_tables:
+            projection_tables[table] = [list(), dict()]
+        projection_tables[table][0].append(attr_index)
+        projection_tables[table][1][attr_index] = proj[1]   # reverse mapping.  Index --> attribute name
+
+    # find ON clause attributes that would be removed by projections and do not perform them (mark for later)
+    attr_to_remove = []
+    for join_instance in this_query.joins:
+        if join_instance[0] != "natural" and join_instance[0] != "equi":  # only look at those joins with an ON clause
+            # load join information
+            left_table = join_instance[1]
+            left_attr = join_instance[3]
+            right_table = join_instance[2]
+            right_attr = join_instance[4]
+
+            # check for projections affecting the left table
+            if left_table in projection_tables:
+                left_attr_ind = this_query.from_tables[left_table][1][left_attr]
+                if left_attr_ind not in projection_tables[left_table][1]:
+                    projection_tables[left_table][0].append(left_attr_ind)
+                    projection_tables[left_table][1][left_attr_ind] = left_attr
+                    attr_to_remove.append((left_table, left_attr))
+
+            # check for projections affecting the right table
+            if right_table in projection_tables:
+                right_attr_ind = this_query.from_tables[right_table][1][right_attr]
+                if right_attr_ind not in projection_tables[right_table][1]:
+                    projection_tables[right_table][0].append(right_attr_ind)
+                    projection_tables[right_table][1][right_attr_ind] = right_attr
+                    attr_to_remove.append((right_table, right_attr))
+
+    # perform projections
+    for table in projection_tables:
+        if table not in outer_tables:   # if table is not involved in a join
+            # projection set up
+            projection_tables[table][0] = list(set(projection_tables[table][0]))
+            indices = list(sorted(projection_tables[table][0]))
+
+            # determine new dict for this relation, resulting from the projection
+            project_attr_dict = {}
+            counter = 0     # indices are sorted and will be projected in this sorted order
+            for i in indices:
+                project_attr_dict[projection_tables[table][1][i]] = counter     # map attr name --> new index in post-projection relation
+                counter += 1
+
+            # pass in relation and list of indices to return
+            this_query.from_tables[table] = (projection(this_query.from_tables[table][0], indices), project_attr_dict)
+            l = [*projection_tables[table][1].values()]
+            li = [l[element] + ", " for element in range(len(l)) if element < (len(l)-1)]
+            li.append(l[-1])
+            explain_string = explain_string + "\nProjection: (" + "".join(li) + ") for table " + table + " performed before joins."
 
 
-            # validate table (and check all columns too)
-            if len(table_name_attr) != 2:
-                error(" invalid insert syntax")
+
+    #                   #
+    #   Perform joins   #
+    #                   #
+    if len(this_query.joins) > 0:
+        # order joins based on summed number of tuples.  Perform smallest first
+        this_query.joins.sort(key= lambda x: (len(this_query.from_tables[x[1]][0]) + len(this_query.from_tables[x[2]][0])))
+        explain_string = explain_string + "\nJoin order: " + "".join(["\tPair: " + str(x[1]) + ' '+ str(x[2]) for x in this_query.joins])
+
+        # perform joins
+        for join_tup in this_query.joins:
+            # left table set up.  Resolve aliases
+            left_table = join_tup[1]
+            left_attr = join_tup[3]
+            if left_table in this_query.alias:
+                left_table = this_query.from_tables[left_table]
+            if type(this_query.from_tables[left_table]) is str:
+                left_table = this_query.from_tables[left_table]
+            if left_attr is not None and len(left_attr) > 0:    # determine index of desired attribute
+                left_attr_index = this_query.from_tables[left_table][1][left_attr]
             else:
-                table_name = table_name_attr[0].rstrip().lstrip()
-                dml_obj.table_name = table_name
-                table_columns = table_name_attr[1].replace(")", "").split(",")
+                left_attr_index = None
 
-                for i in range(len(table_columns)):     # clean whitespace and closing )
-                    table_columns[i] = table_columns[i].lstrip().rstrip()
-
-                if table_name in TABLES:        # check that all attributes have been specified in the insert command
-                    column_set = set(table_columns)
-
-                    helper1 = TABLES[table_name].attribute_names.difference(column_set)
-                    helper2 = column_set.difference(TABLES[table_name].attribute_names)
-
-
-                    if len(helper1) != 0 or len(helper2) != 0:     # if difference is non-empty, sets are not identical
-                        error(" table names match, but attribute sets do not.")
-                else:
-                    error(" invalid table name in insert.")
-
-
-            # syntax checking/casting for specified values
-            if len(value_list) != 2:
-                error(" invalid syntax.  Missing (")
+            # right table set up.  Resolve aliases
+            right_table = join_tup[2]
+            right_attr = join_tup[4]
+            if right_table in this_query.alias:
+                right_table = this_query.from_tables[right_table]
+            if type(this_query.from_tables[right_table]) is str:
+                right_table = this_query.from_tables[right_table]
+            if right_attr is not None and len(right_attr) > 0:  # determine index of desired attribute
+                right_attr_index = this_query.from_tables[right_table][1][right_attr]
             else:
-                val_list = value_list[1].split(")")
-                if len(val_list) != 2:
-                    error(" invalid syntax.  Missing )")
-                else:
-                    temp = val_list[0].split(",")
-                    for i in temp:
-                        helper = i.rstrip().lstrip()
-                        if helper.isdigit():
-                            if len(helper.split(".")) != 1:
-                                dml_obj.values.append(float(helper))
-                            else:
-                                dml_obj.values.append(int(helper))
-                        else:
-                            dml_obj.values.append(helper.replace("\"", ""))  # drop whitespace and insert into list
+                right_attr_index = None
 
+            # determine join type based on the relative sizes of the relations to join
+            ty = join_tup[0]
+            left_size = len(this_query.from_tables[left_table][0])
+            right_size = len(this_query.from_tables[right_table][0])
+            nested = False      # default to sort/merge join
+            if left_size >= JOIN_MULT*right_size or right_size >= JOIN_MULT*left_size:      # if joins differ significantly in size, use nested join
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": nested join"
+                nested = True
 
+                # determine outer table --> if needed, switch names, attribute indices, and type of join (left <--> right)
+                if right_size < left_size:      # if smaller table is not the outer table, then flip relation positions
+                    explain_string += ". Table order flipped"
+                    temp_relation = left_table
+                    left_table = right_table
+                    right_table = temp_relation
 
-        elif "update " in inp_line:
-            dml_obj.update = True
-            # break into table name, set values, and where condition
-            l = re.split(" set ", inp_line)
-            if len(l) != 2:
-                error(" syntax error update.")
+                    temp_attr = left_attr_index
+                    left_attr_index = right_attr_index
+                    right_attr_index = temp_attr
 
-            # determine table name
-            up = re.split("pdate ", l[0])   # exclude the letter u so can evaluate the len to 2 (tell if missing table name)
-            if len(up) != 2:
-                error(" missing table name in update command.")
-            table_name = up[1].lstrip().rstrip()
-            dml_obj.table_name = table_name
-
-            # validate table name
-            if table_name not in TABLES:
-                error(" invalid table name used in update.")
-
-
-            # determine set values and parse where condition if it exists
-            se = re.split(" where ", l[1])
-            if len(se) == 2:    # where clause found
-                set_values = se[0].split(",")
-                dml_obj.where = parse_where_dml(dml_obj, se[1])
-
-            elif len(se) == 1:  # no where clause included
-                set_values = se[0].split(",")
+                    # left/right outer joins are not commutative, so need to flip to keep query the same
+                    if ty == "left":
+                        ty = "right"
+                    elif ty == "right":
+                        ty = "left"
             else:
-                error(" invalid update syntax")
+                explain_string = explain_string + "\nJoin " + join_tup[1] + " " + join_tup[2] + ": sort/merge join"
 
+            # determine attribute index dictionary resulting from this join
+            natural_list = []
+            join_attr_dict = {}
+            match_flag = True
+            if ty == "equi":
+                # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
+                join_attr_dict = this_query.from_tables[left_table][1]
+                attr_offset = len(join_attr_dict)
+                for k in this_query.from_tables[right_table][1]:
+                    attr_ind = this_query.from_tables[right_table][1][k] + attr_offset
+                    if this_query.from_tables[right_table][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
+                        attr_ind -= 1
+                    join_attr_dict[k] = attr_ind
+            elif ty == "natural":
+                # determine attributes shared between tables to be natural joined
+                common_list = []
+                for a1 in list(this_query.from_tables[left_table][1].keys()):
+                    for a2 in list(this_query.from_tables[right_table][1].keys()):
+                        if a1 == a2:    # common attribute found
+                            helper = (this_query.from_tables[left_table][1][a1], this_query.from_tables[right_table][1][a2])
+                            common_list.append(helper[1])   # record common attribute indices in the right table
+                            natural_list.append(helper)
 
-            # produces a list of Comparison objects (use assignment option) to represent set statements
-            for s in set_values:
-                this_comp = Comparison()
-                this_comp.assignment = True
+                # concatenate right attributes to left ones.  Drop common attributes from the right relation, as done by join function
+                join_attr_dict = this_query.from_tables[left_table][1]
+                attr_offset = len(join_attr_dict)
+                counter = 0
+                for k in this_query.from_tables[right_table][1]:
+                    if this_query.from_tables[right_table][1][k] not in common_list:
+                        attr_ind = counter + attr_offset
+                        join_attr_dict[k] = attr_ind        # map string name to index location
+                        counter += 1
 
-                operands = s.split("=")
-                if len(operands) != 2:
-                    error(" invalid number of operands in set clause of update.")
-
-                # determine data types of operands and clear of whitespace
-                left = operands[0].lstrip().rstrip()
-                if left.isdigit():
-                    error(" attribute being assigned must be on the left side")
+            elif ty == "left" or ty == "right" or ty == "full":
+                # need to determine if the attributes being joined on are the same (same name)
+                if left_attr == right_attr:
+                    # concatenate right attributes to left ones.  Drop shared attribute from right relation, as is done by join function
+                    join_attr_dict = this_query.from_tables[left_table][1].copy()
+                    attr_offset = len(join_attr_dict)
+                    for k in this_query.from_tables[right_table][1]:
+                        raw_ind = this_query.from_tables[right_table][1][k]
+                        attr_ind = raw_ind + attr_offset
+                        if raw_ind == right_attr_index:
+                            join_attr_dict[k] = left_attr_index
+                            continue
+                        elif raw_ind > right_attr_index:  # account for the removal of this duplicate attribute
+                            attr_ind -= 1
+                        join_attr_dict[k] = attr_ind
                 else:
-                    this_comp.left_operand = left
-                    if left not in TABLES[table_name].attribute_names:
-                        error(" cannot update a non-existent attribute.")
+                    match_flag = False      # if on clause operands do not share a name, cannot remove common attribute from the table
+                    join_attr_dict = this_query.from_tables[left_table][1].copy()
 
-                right = operands[1].lstrip().rstrip()
-                if right.isdigit():
-                    if len(right.split(".")) == 2:
-                        this_comp.right_operand = float(right)
-                    else:
-                        this_comp.right_operand = int(right)
-                else:
-                    this_comp.right_operand = right
+                    # add a table prefix to any common attributes between tables (disambiguate between table/attributes)
+                    attr_list = [*join_attr_dict]
+                    for i in attr_list:
+                        if i in this_query.from_tables[right_table][1]:
+                            ind = join_attr_dict[i]
+                            join_attr_dict.pop(i)
+                            join_attr_dict[left_table + "." + i] = ind
 
-                # add this comparison object to dml_obj
-                dml_obj.set.append(this_comp)
+                            # update select clause to reflect this change in attribute name
+                            for at in range(len(this_query.select_attr)):
+                                a = this_query.select_attr[at]
+                                if a[1] == i and a[0] == left_table:
+                                    if len(a) == 3:
+                                        a = (a[0], a[0] + "." + a[1], a[2])
+                                    else:
+                                        a = (a[0], a[0] + "." + a[1])
+                                    this_query.select_attr[at] = a
 
+                    attr_offset = len(join_attr_dict)
+                    for k in this_query.from_tables[right_table][1]:
+                        raw_ind = this_query.from_tables[right_table][1][k]
+                        attr_ind = raw_ind + attr_offset
+                        if k in this_query.from_tables[left_table][1]:
+                            # update select clause to reflect this change in name
+                            for at in range(len(this_query.select_attr)):
+                                a = this_query.select_attr[at]
+                                if a[1] == k and a[0] == right_table:
+                                    if len(a) == 3:
+                                        a = (a[0], a[0] + "." + a[1], a[2])
+                                    else:
+                                        a = (a[0], a[0] + "." + a[1])
+                                    this_query.select_attr[at] = a
 
-        else:       # delete
-            dml_obj.delete = True
+                            k = right_table + "." + k
+                        join_attr_dict[k] = attr_ind    # keep this line down here so naming changes will be applied
 
-            # break into table name and WHERE condition (and parse where condition if it exists
-            del_list = re.split(" where ", inp_line)
-            if len(del_list) == 2:  # where clause found
-                dml_obj.where = parse_where_dml(dml_obj, del_list[1])
-            elif len(del_list) != 1:
-                error(" too many WHERE clauses in delete")
-
-            # else --> no where clause found.  Can parse table name the same whether or not where clause was found
-
-
-            # get table name
-            t_name = re.split("elete from", del_list[0])    # remove d from delete so can tell if produces 1 or two items
-            if len(t_name) != 2:
-                error(" delete command syntax error.")
-
-
-            # validate table name
-            table_name = t_name[1].lstrip().rstrip()
-            if table_name in TABLES:
-                dml_obj.table_name = table_name
+                # make compatible with join function (parser/backend naming conventions differ)
+                if ty == "full":
+                    ty = "outer"
             else:
-                error(" invalid table name in delete")
+                error(" parsing error. Unrecognized join type in query optimizer.")
 
-        # return DML object
-        return dml_obj
-    elif ddl:
-        # breakdown and classify as CREATE or DROP / TABLE or INDEX'
-        ddl_obj = DDL()
-
-        # treat each case appropriately
-        if "create " in inp_line and " table " in inp_line:
-            ddl_obj.create = True
-            ddl_obj.table = True
-
-            # break up input
-            create_list = inp_line.split("(", maxsplit=1)
-            if len(create_list) != 2:
-                error(" invalid create table syntax.")
-
-            # determine table name and verify no table exist with the same name
-            t_name = re.split("create table ", create_list[0])
-            if len(t_name) != 2:
-                error(" invalid create table syntax.  No table name supplied.")
-
-            table_name = t_name[1].lstrip().rstrip()
-            if table_name in TABLES:
-                error(" table name already in use.")
-
-            ddl_obj.table_name = table_name
-
-            # get list of attributes (tokenize by ','.  Record as tuples of (name, datatype))
-            attr_list = create_list[1].split(",")
-            attr_list[-1] = attr_list[-1][:len(attr_list[-1]) - len(")")]       # strip only the final ")" from input
-            for attr in attr_list:  # for each attribute in list, split into name and data type
-                if "primary key" in attr:
-                    # take the value between the parenthesis and save as primary key
-                    key_attr = attr.split("(")[1].split(")")[0].lstrip().rstrip()
-
-                    # determine if primary key attribute exists
-                    exists = False
-                    for a in ddl_obj.attr:
-                        if a[0] == key_attr:
-                            ddl_obj.primary_key = key_attr
-                            exists = True
-                            break
-                    if not exists:
-                        error(" primary key does not match any specified attributes.")
-
-                elif "foreign key" in attr:
-                    # get key attribute
-                    spl = attr.split(")", 1)    # only split on first parenthesis
-                    key_attr = spl[0].split("(")[1]
-
-
-                    # get table/attribute reference
-                    table_attr_pair = re.split(" references", spl[1])[1]
-                    h = table_attr_pair.split("(")
-                    for_table = h[0].lstrip().rstrip()
-                    for_attr = h[1].split(")")[0].lstrip().rstrip()
-
-                    # validate table/attr reference
-                    if for_table not in TABLES:
-                        error(" cannot have foreign key reference a nonexistent table.")
-
-                    if for_attr != TABLES[for_table].primary_key:
-                        error(" cannot have foreign key reference a nonexistent attribute (existing table).")
-
-                    # validate key attribute
-                    found = False
-                    for a in ddl_obj.attr:
-                        if a[0] == key_attr:
-                            found = True
-                            break
-                    if not found:
-                        error(" foreign key attribute does not exist in this relation.")
-
-                    # save result
-                    ddl_obj.primary_key = key_attr      # required for referential integrity
-                    ddl_obj.foreign_key = (key_attr, for_table, for_attr)
-                elif attr.lstrip().rstrip() == "now":
-                    ddl_obj.now = True
-                else:
-                    l = attr.split()
-                    if len(l) != 2:
-                        error(" missing data type")
-                    ddl_obj.attr.append((l[0].lstrip().rstrip(), l[1].lstrip().rstrip()))   # append tuple (attr, dtype)
-
-        elif "drop " in inp_line and " table " in inp_line:
-            ddl_obj.create = False
-            ddl_obj.table = True
-
-
-            # get table name (and validate it)
-            l = re.split(" table ", inp_line)
-            table_name = l[1].lstrip().rstrip()
-
-            # validate table name
-            if table_name not in TABLES:
-                error(" invalid table name.  Cannot delete table that does not exist")
+            # perform join and store result
+            if ty == "natural" and len(natural_list) < 0:
+                joined_relation = []    # no common attributes, so return an empty relation
             else:
-                ddl_obj.table_name = table_name
+                joined_relation = join(this_query.from_tables[left_table][0], this_query.from_tables[right_table][0], left_attr_index, right_attr_index, ty, nested, natural_list, match_flag)
+
+            # direct names of tables used in join to the join result
+            join_name = "JOIN_" + left_table + "_" + right_table
+            this_query.from_tables[left_table] = join_name  # now when these are referenced, redirect to join result (this redirects are the only non-alias strings left in from_tables)
+            this_query.from_tables[right_table] = join_name
+            this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
+
+    #                                                                   #
+    #   Finish projections that were delayed due to join involvement    #
+    #                                                                   #
+    # perform any projections that were delayed due to involvement of that table in an outer join
+    joined_table_attrs = {}
+    for table in projection_tables:
+        if table in outer_tables:
+            # resolve name aliasing
+            joined_table = table
+            while type(this_query.from_tables[joined_table]) is str:
+                joined_table = this_query.from_tables[joined_table]
+
+            if joined_table not in joined_table_attrs:
+                joined_table_attrs[joined_table] = ([], {})     # list to store all indices to keep, dictionary to map indices to names
+
+            # determine indices of attributes to remove in joined relation
+            for a in this_query.select_attr:
+                if a[0] == table:
+                    ind = this_query.from_tables[joined_table][1][a[1]]
+                    joined_table_attrs[joined_table][0].append(ind)
+                    joined_table_attrs[joined_table][1][ind] = a[1]
+
+
+    # perform projections. Update attribute dictionaries appropriately
+    for j in [*joined_table_attrs]:     # loop through the keys of joined_table_attrs
+        joined_table_attrs[j] = (list(set(joined_table_attrs[j][0])), joined_table_attrs[j][1])
+
+        # determine new dict for this relation, resulting from the projection
+        project_attr_dict = {}
+        counter = 0
+        for i in joined_table_attrs[j][0]:
+            project_attr_dict[joined_table_attrs[j][1][i]] = counter  # map attr name --> new index in relation
+            counter += 1
+
+        # pass in relation and list of indices to return
+        this_query.from_tables[j] = (projection(this_query.from_tables[j][0], joined_table_attrs[j][0]), project_attr_dict)
+        l = [*project_attr_dict]
+        li = [l[element] + ", " for element in range(len(l)) if element < (len(l) - 1)]
+        li.append(l[-1])
+        explain_string = explain_string + "\nProjections delayed because table involved in a join: (" + "".join(li) + ") for " + j + " performed."
+
+
+    #                                                       #
+    #   Apply aggregate operators found in SELECT clause    #
+    #                                                       #
+    # determine how aggregate operators are used in SELECT clause
+    all_agg = True
+    agg_count = 0
+    for s in this_query.select_attr:
+        if len(s) > 2:
+            agg_count += 1
+        else:
+            all_agg = False
+
+    if agg_count > 0:
+        if all_agg:
+            # if all attributes in SELECT clause use aggregate operators, only output a single tuple
+            attr_list = []
+            output_list = []
+            for s in this_query.select_attr:
+                # resolve naming aliases
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
+
+                # calculate aggregate value
+                val = 0
+                if s[2] == "max":
+                    val = max_agg(this_query.from_tables[table_name][0],  this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif s[2] == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
+
+                # add to output list
+                attr_list.append(s[2] + "(" + s[1] + ")")
+                output_list.append(val)
+
+            # if "now" function was specified, include it now
+            if this_query.now:
+                t = time.localtime()
+                current_time = time.strftime("%H:%M:%S", t)
+                attr_list.append("NOW")
+                output_list.append(current_time)
+
+            # output result
+            return attr_list, [output_list], explain_string
 
-            pass
-        elif "create " in inp_line and " index " in inp_line:
-            ddl_obj.create = True
-            ddl_obj.table = False
-            # break into index name/table information (using ON clause)
-            c_ind_list = re.split(" on ", inp_line)
-            if len(c_ind_list) != 2:
-                error(" invalid create index syntax.")
 
-            # get index name
-            ind = re.split(" index ", c_ind_list[0])
-            ind_name = ind[1].rstrip().lstrip()
-
-            # validate index name (make sure does not exist)
-            if ind_name in INDEX:
-                error(" cannot create 2 indexes with the same name.")
-            ddl_obj.index_name = ind_name
-
-            # get table/attr name
-            t_name = c_ind_list[1].split("(")
-            if len(t_name) != 2:
-                error(" invalid syntax.  Must specify what attribute to create index on.")
-            table_name = t_name[0].rstrip().lstrip()    # clean whitespace
-            attr = t_name[1].split(')')                 # drop closing parenthesis from attribute name
-            attr_name = attr[0].rstrip().lstrip()       # clean whitespace
-
-            # validate table name
-            if table_name not in TABLES:
-                error(" cannot create an index on a nonexistent table.")
-            elif attr_name not in TABLES[table_name].attribute_names:
-                error(" cannot create an index on an attribute that does not exist in the given table.")
-
-            # else, set valid table and attribute names
-            ddl_obj.table_name = table_name
-            ddl_obj.attr.append(attr_name)
-
-        else:       # drop index
-            # validate index name
-            ddl_obj.create = False
-            ddl_obj.table = False
-
-            # get table name (and validate it)
-            l = re.split(" index ", inp_line)
-            ind_name = l[1].lstrip().rstrip()
-
-            # validate index name
-            if ind_name not in INDEX:
-                error(" cannot drop a non-existent index.")
-            ddl_obj.index_name = ind_name
-
-
-
-        return ddl_obj
-    else:       # invalid input.  Throw error and take next line of input
-        error(" unrecognized input type (not DML or DDL)")
-# END parser_main
-
-
-
-
-
-# parse_query
-def parse_query(this_query, inp_line):
-    # tokenize input on UNION, INTERSECT, DIFFERENCE (break into different query objects and parse them)
-    # calls parser recursively, so only need to handle the "one" or "none" cases
-    if "union" in inp_line:
-        this_query.union = True
-        l = re.split("union", inp_line)
-
-        # call query parser on both left and right queries
-        this_query.left_query = parse_query(Query(), l[0])
-        this_query.right_query = parse_query(Query(), l[1])
-
-    elif "intersect" in inp_line:
-        this_query.intersect = True
-        l = re.split("intersect", inp_line)
-
-        # call query parser on both left and right queries
-        this_query.left_query = parse_query(Query(), l[0])
-        this_query.right_query = parse_query(Query(), l[1])
-
-    elif "difference" in inp_line:
-        this_query.difference = True
-        l = re.split("difference", inp_line)
-
-        # call query parser on both left and right queries
-        this_query.left_query = parse_query(Query(), l[0])
-        this_query.right_query = parse_query(Query(), l[1])
-    else:
-        # break query into SELECT, FROM, and WHERE clauses (can add GROUPBY/HAVING here too) --> parse FROM first to define all aliases
-        select_start = inp_line.find("select") + len("select")
-        select_end = inp_line.find("from")
-        from_end = inp_line.find("where")
-        if from_end == -1:
-            from_end = len(inp_line) + 1
-        select_clause = inp_line[select_start: select_end]
-        from_clause = inp_line[(select_end + len("from")): from_end]
-        where_clause = inp_line[(from_end + len("where")):]
-
-        ### parse FROM ###
-        # tokenize on ',' to separate table names
-        from_list = from_clause.split(',')
-        for name in from_list:
-            # tokenize on joins before can tokenize aliases
-            # tokenize on JOIN (classify as NATURAL JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN, or INNER JOIN) --> validate contents of ON clause for join too
-            if " join " in name:
-                # for each pair of partitions (table_info JOIN table_info --> (table_info1, table_info2))
-                # split on "join" --> more than 2 partitions? (means >1 join)
-                joins = re.split(" join ", name)
-                # each partition contains one table name.  A rough measure (may double count some tables in edge cases, but only ever compared > 1 so is ok)
-                this_query.num_tables += len(joins)
-                if len(joins) <= 2:
-                    # determine join type
-                    join_type = ""
-                    left_side = ""
-                    left_on = ()
-                    right_on = ()
-                    on_clause = False
-                    if " natural" in joins[0]:
-                        join_type = "natural"
-                        left_on = None
-                        right_on = None
-                        left_side = re.split(" natural", joins[0])[0]
-                    elif " outer" in joins[0]:
-                        if " left " in joins[0]:
-                            join_type = "left"
-                            left_side = re.split(" left outer", joins[0])[0]
-                        elif " right " in joins[0]:
-                            join_type = "right"
-                            left_side = re.split(" right outer", joins[0])[0]
-                        else:
-                            join_type = "full"
-                            left_side = re.split(" full outer", joins[0])[0]
-                        on_clause = True
-                    else:
-                        error(" unrecognized join type.  Must be NATURAL, LEFT/RIGHT/FULL OUTER.")
-
-
-                    # split off ON clause (if exists)
-                    right_side = joins[1]
-                    if on_clause:
-                        # break clause up into operands --> validate at end of iteration to allow for the use of aliases
-                        clause = re.split(" on ", joins[1])
-                        right_side = clause[0].lstrip().rstrip()
-                        o = clause[1].split(" = ")
-
-                        # parse left side of ON clause
-                        left_o = o[0].split(".")
-                        if len(left_o) > 1:
-                            # table specified
-                            left_on = (left_o[0].lstrip().rstrip(), left_o[1].lstrip().rstrip())
-                        else:
-                            # table not specified
-                            left_on = ("", left_o[0])
-
-                        # parse right side of ON clause
-                        right_o = o[1].split(".")
-                        if len(right_o) > 1:
-                            # table specified
-                            right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
-                        else:
-                            # table not specified
-                            right_on = ("", right_o[0])
-
-
-                    # determine aliasing of join tables
-                    # left
-                    left_name = ""
-                    alias_list = re.split(" as ", left_side)
-                    if len(alias_list) > 1:
-                        # strip whitespace off alias and name
-                        alias_list[0] = alias_list[0].rstrip().lstrip()
-                        alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                        # validate table existence (alias_list[0])
-                        if alias_list[0] in TABLES:
-                            # table exists.  put both alias and table name into from_tables (put into from_tables)
-                            this_query.from_tables[alias_list[1]] = alias_list[0]
-                            this_query.from_tables[alias_list[0]] = alias_list[0]
-                            this_query.alias.add(alias_list[1])
-                            left_name = alias_list[0]
-                        else:
-                            error("nonexistent table used in FROM clause")
-
-                    else:
-                        # no alias found, just insert to query from_table
-                        # strip whitespace from ends
-                        left_side = left_side.rstrip().lstrip()
-
-                        # validate table name
-                        if left_side in TABLES:
-                            this_query.from_tables[left_side] = left_side
-                            left_name = left_side
-                        else:
-                            error("nonexistent table used in FROM clause")
-
-                    # right
-                    alias_list = []     # empty list, just to be safe
-                    right_name = ""
-                    alias_list = re.split(" as ", right_side)
-                    if len(alias_list) > 1:
-                        # strip whitespace off alias and name
-                        alias_list[0] = alias_list[0].rstrip().lstrip()
-                        alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                        # validate table existence (alias_list[0])
-                        if alias_list[0] in TABLES:
-                            # table exists.  put both alias and table name into from_tables (put into from_tables)
-                            this_query.from_tables[alias_list[1]] = alias_list[0]
-                            this_query.from_tables[alias_list[0]] = alias_list[0]
-                            this_query.alias.add(alias_list[1])
-                            right_name = alias_list[0]
-                        else:
-                            error("nonexistent table used in FROM clause")
-                    else:
-                        # no alias found, just insert to query from_table
-                        # strip whitespace from ends
-                        right_side = right_side.rstrip().lstrip()
-
-                        # validate table name
-                        if right_side in TABLES:
-                            this_query.from_tables[right_side] = right_side
-                            right_name = right_side
-                        else:
-                            error("nonexistent table used in FROM clause")
-
-                    # validate ON clause contents, if they exist
-                    if on_clause:
-                        # validate left
-                        if left_on[0] == "":
-                            if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                        else:
-                            # table specified, validate
-                            if left_on[0] in this_query.alias:
-                                left_on = (this_query.from_tables[left_on[0]], left_on[1])
-                            if left_on[0] in TABLES:
-                                if left_on[1] not in TABLES[left_on[0]].attribute_names:
-                                    error(" nonexistent attribute name in join ON clause.  Valid table name.")
-                            else:
-                                error(" invalid table name in join ON clause.")
-
-                        # validate right
-                        if right_on[0] == "":
-                            if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                        else:
-                            # table specified, validate
-                            if right_on[0] in this_query.alias:
-                                right_on = (this_query.from_tables[right_on[0]], right_on[1])
-                            if right_on[0] in TABLES:
-                                if right_on[1] not in TABLES[right_on[0]].attribute_names:
-                                    error(" nonexistent attribute name in join ON clause.  Valid table name.")
-                            else:
-                                error(" invalid table name in join ON clause.")
-
-                    # add join to this_query
-                    if right_on is None or left_on is None:
-                        this_query.joins.append((join_type, left_name, right_name, None, None))
-                    else:
-                        this_query.joins.append((join_type, left_name, right_name, left_on[1], right_on[1]))
-
-                else:
-                    # know there are multiple joins --> know what type of joins to perform.  Split on join so specifier is in the preceding partition
-                    join_types = []
-                    for i in range(len(joins)):
-                        if i > 0:
-                            t = ""
-                            if " left outer" in joins[i-1]:
-                                t = "left"
-                                joins[i-1] = re.split(" left outer", joins[i-1])[0]     # strip off join specifier
-                            elif " right outer" in joins[i-1]:
-                                t = "right"
-                                joins[i-1] = re.split(" right outer", joins[i-1])[0]    # strip off join specifier
-                            elif " natural" in joins[i-1]:
-                                t = "natural"
-                                joins[i-1] = re.split(" natural", joins[i-1])[0]        # strip off join specifier
-                            elif " full outer" in joins[i-1]:
-                                t = "full"
-                                joins[i-1] = re.split(" full outer", joins[i-1])[0]     # strip off join specifier
-                            else:
-                                error(" unknown type of join in multiple join parsing.")
-                            join_types.append(t)
-
-
-
-                    # split into multiple joins --> create a sequential list of joins that will be parsed after first one handled
-                    for i in range(len(joins)):
-                        if i < 2:
-                            if i == 0:
-                                # split off ON clause (if exists)
-                                left_on = ()
-                                right_on = ()
-
-                                on_clause = True
-                                join_type = join_types[0]
-                                if join_type == "natural":
-                                    on_clause = False
-                                    left_on = None
-                                    right_on = None
-
-                                left_side = joins[0]
-                                right_side = joins[1]
-
-
-                                if on_clause:
-                                    # break clause up into operands --> validate at end of iteration to allow for the use of aliases
-                                    clause = re.split(" on ", right_side)
-                                    right_side = clause[0].lstrip().rstrip()
-                                    o = clause[1].split(" = ")
-
-                                    # parse left side of ON clause
-                                    left_o = o[0].split(".")
-                                    if len(left_o) > 1:
-                                        # table specified
-                                        left_on = (left_o[0].lstrip().rstrip(), left_o[1].lstrip().rstrip())
-                                    else:
-                                        # table not specified
-                                        left_on = ("", left_o[0])
-
-                                    # parse right side of ON clause
-                                    right_o = o[1].split(".")
-                                    if len(right_o) > 1:
-                                        # table specified
-                                        right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
-                                    else:
-                                        # table not specified
-                                        right_on = ("", right_o[0])
-
-                                # determine aliasing of join tables
-                                # left
-                                left_name = ""
-                                alias_list = re.split(" as ", left_side)
-                                if len(alias_list) > 1:
-                                    # strip whitespace off alias and name
-                                    alias_list[0] = alias_list[0].rstrip().lstrip()
-                                    alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                                    # validate table existence (alias_list[0])
-                                    if alias_list[0] in TABLES:
-                                        # table exists.  put both alias and table name into from_tables (put into from_tables)
-                                        this_query.from_tables[alias_list[1]] = alias_list[0]
-                                        this_query.from_tables[alias_list[0]] = alias_list[0]
-                                        this_query.alias.add(alias_list[1])
-                                        left_name = alias_list[0]
-                                    else:
-                                        error("nonexistent table used in FROM clause")
-
-                                else:
-                                    # no alias found, just insert to query from_table
-                                    # strip whitespace from ends
-                                    left_side = left_side.rstrip().lstrip()
-
-                                    # validate table name
-                                    if left_side in TABLES:
-                                        this_query.from_tables[left_side] = left_side
-                                        left_name = left_side
-                                    else:
-                                        error("nonexistent table used in FROM clause")
-
-                                # right
-                                alias_list = []  # empty list, just to be safe
-                                right_name = ""
-                                alias_list = re.split(" as ", right_side)
-                                if len(alias_list) > 1:
-                                    # strip whitespace off alias and name
-                                    alias_list[0] = alias_list[0].rstrip().lstrip()
-                                    alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                                    # validate table existence (alias_list[0])
-                                    if alias_list[0] in TABLES:
-                                        # table exists.  put both alias and table name into from_tables (put into from_tables)
-                                        this_query.from_tables[alias_list[1]] = alias_list[0]
-                                        this_query.from_tables[alias_list[0]] = alias_list[0]
-                                        this_query.alias.add(alias_list[1])
-                                        right_name = alias_list[0]
-                                    else:
-                                        error("nonexistent table used in FROM clause")
-                                else:
-                                    # no alias found, just insert to query from_table
-                                    # strip whitespace from ends
-                                    right_side = right_side.rstrip().lstrip()
-
-                                    # validate table name
-                                    if right_side in TABLES:
-                                        this_query.from_tables[right_side] = right_side
-                                        right_name = right_side
-                                    else:
-                                        error("nonexistent table used in FROM clause")
-
-                                # validate ON clause contents, if they exist
-                                if on_clause:
-                                    # validate left
-                                    if left_on[0] == "":
-                                        if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                            error(
-                                                " ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                                    else:
-                                        # table specified, validate
-                                        if left_on[0] in TABLES:
-                                            if left_on[1] not in TABLES[left_on[0]].attribute_names:
-                                                error(
-                                                    " nonexistent attribute name in join ON clause.  Valid table name.")
-                                        else:
-                                            error(" invalid table name in join ON clause.")
-
-                                    # validate right
-                                    if right_on[0] == "":
-                                        if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                            error(
-                                                " ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                                    else:
-                                        # table specified, validate
-                                        if right_on[0] in TABLES:
-                                            if right_on[1] not in TABLES[right_on[0]].attribute_names:
-                                                error(
-                                                    " nonexistent attribute name in join ON clause.  Valid table name.")
-                                        else:
-                                            error(" invalid table name in join ON clause.")
-
-                                # add join to this_query
-                                if left_on is None or right_on is None:
-                                    this_query.joins.append((join_type, left_name, right_name, None, None))
-                                else:
-                                    this_query.joins.append((join_type, left_name, right_name, left_on[1], right_on[1]))
-
-                            else:
-                                pass        # do nothing for the middle partition (i == 1)
-                        else:
-                            # all remaining joins are appended to the first one.  Only have to examine right side since left has been parsed already
-                            # parse right side and take previous right table name as the left table for this join
-                            on_clause = True
-                            join_type = join_types[i-1]
-                            if join_type == "natural":
-                                on_clause = False
-
-                            right_side = joins[i]
-
-                            # split off ON clause (if exists)
-                            left_on = ()
-                            right_on = ()
-                            if on_clause:
-                                # break clause up into operands --> validate at end of iteration to allow for the use of aliases
-                                clause = re.split(" on ", right_side)
-                                right_side = clause[0].lstrip().rstrip()
-                                o = clause[1].split(" = ")
-
-                                # parse left side of ON clause
-                                left_o = o[0].split(".")
-                                if len(left_o) > 1:
-                                    # table specified
-                                    left_on = (left_o[0].lstrip().rstrip(), left_o[1].lstrip().rstrip())
-                                else:
-                                    # table not specified
-                                    left_on = ("", left_o[0])
-
-                                # parse right side of ON clause
-                                right_o = o[1].split(".")
-                                if len(right_o) > 1:
-                                    # table specified
-                                    right_on = (right_o[0].lstrip().rstrip(), right_o[1].lstrip().rstrip())
-                                else:
-                                    # table not specified
-                                    right_on = ("", right_o[0])
-
-                            # determine aliasing of join tables
-
-                            # right alias checking
-                            alias_list = []
-                            right_name = ""
-                            alias_list = re.split(" as ", right_side)
-                            if len(alias_list) > 1:
-                                # strip whitespace off alias and name
-                                alias_list[0] = alias_list[0].rstrip().lstrip()
-                                alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                                # validate table existence (alias_list[0])
-                                if alias_list[0] in TABLES:
-                                    # table exists.  put both alias and table name into from_tables (put into from_tables)
-                                    this_query.from_tables[alias_list[1]] = alias_list[0]
-                                    this_query.from_tables[alias_list[0]] = alias_list[0]
-                                    this_query.alias.add(alias_list[1])
-                                    right_name = alias_list[0]
-                                else:
-                                    error("nonexistent table used in FROM clause")
-                            else:
-                                # no alias found, just insert to query from_table
-                                # strip whitespace from ends
-                                right_side = right_side.rstrip().lstrip()
-
-                                # validate table name
-                                if right_side in TABLES:
-                                    this_query.from_tables[right_side] = right_side
-                                    right_name = right_side
-                                else:
-                                    error("nonexistent table used in FROM clause")
-
-                            # validate ON clause contents, if they exist
-                            if on_clause:
-                                # validate left
-                                if left_on[0] == "":
-                                    if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                        error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                                else:
-                                    # table specified, validate
-                                    left_on = (this_query.from_tables[left_on[0]], left_on[1])  # handle aliasing
-                                    if left_on[0] in TABLES:
-                                        if left_on[1] not in TABLES[left_on[0]].attribute_names:
-                                            error(
-                                                " nonexistent attribute name in join ON clause.  Valid table name.")
-                                    else:
-                                        error(" invalid table name in join ON clause.")
-
-                                # validate right
-                                if right_on[0] == "":
-                                    if this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                                        error(
-                                            " ambiguous attribute name.  When >1 table used in query, need to specify table.")
-                                else:
-                                    # table specified, validate
-                                    right_on = (this_query.from_tables[right_on[0]], right_on[1])
-                                    if right_on[0] in TABLES:
-                                        if right_on[1] not in TABLES[right_on[0]].attribute_names:
-                                            error(
-                                                " nonexistent attribute name in join ON clause.  Valid table name.")
-                                    else:
-                                        error(" invalid table name in join ON clause.")
-
-                                # determine left table from the on clause.  On clause operand that does not match the right table name should contain the name of the left table of the join
-                                if left_on[0] == right_name:
-                                    left_name = right_on[0]
-                                elif right_on == right_name:
-                                    left_name = left_on[0]
-                                else:
-                                    error(" on clause does not reference the right table of the join.")
-                            else:
-                                left_name = this_query.joins[-1][2]     # take the right table name from the preceding join and use that as the left name for this join
-
-                            # add join to this_query
-                            this_query.joins.append((join_type, left_name, right_name, left_on, right_on))
-
-            else:       # no joins in this section of FROM clause
-                # check each table name for "as" --> recognize aliases and add to from_tables
-                this_query.num_tables += 1
-                alias_list = re.split(" as ", name)
-                if len(alias_list) > 1:
-                    # strip whitespace off alias and name
-                    alias_list[0] = alias_list[0].rstrip().lstrip()
-                    alias_list[1] = alias_list[1].rstrip().lstrip()
-
-                    # validate table existence (alias_list[0])
-                    if alias_list[0] in TABLES:
-                        # table exists.  put both alias and table name into from_tables (put into from_tables)
-                        this_query.from_tables[alias_list[1]] = alias_list[0]
-                        this_query.from_tables[alias_list[0]] = alias_list[0]
-                        this_query.alias.add(alias_list[1])
-                    else:
-                        error("nonexistent table used in FROM clause")
-                else:
-                    # no alias found, just insert to query from_table
-                    # strip whitespace from ends
-                    name = name.rstrip().lstrip()
-
-                    # validate table name
-                    if name in TABLES:
-                        this_query.from_tables[name] = name
-                    else:
-                        error("nonexistent table used in FROM clause")
-
-        ### parse SELECT ###
-        # tokenize contents of SELECT on ',' --> break up attributes
-        select_list = select_clause.split(",")
-        for attr in range(len(select_list)):
-            agg_list = select_list[attr].split("(")  # opening parenthesis is beginning of aggregate operator
-            if len(agg_list) > 1:
-                if agg_list[0].rstrip().lstrip() == "now" and ")" in agg_list[1]:       # second condition to ensure that this is a call to NOW() and not a now attribute name
-                    this_query.now = True
+        else:
+            # if only some attributes have aggregate operators, apply result to all tuples
+            for se in range(len(this_query.select_attr)):
+                s = this_query.select_attr[se]
+                if len(s) <= 2:     # if attribute does not use an agg. operator, continue
                     continue
 
+                # resolve name aliasing
+                table_name = s[0]
+                if table_name in this_query.alias:
+                    table_name = this_query.from_tables[table_name]
+                if type(this_query.from_tables[table_name]) is str:
+                    table_name = this_query.from_tables[table_name]
 
-                # parse on parenthesis to get attribute name
-                close_paren_list = agg_list[1].split(')')
-                attr_name = close_paren_list[0].rstrip().lstrip()  # attr is between ( and ) and drop whitespace
+                # calculate aggregate value
+                agg_type = s[2]
+                val = -1
+                if agg_type == "max":
+                    val = max_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "min":
+                    val = min_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "sum":
+                    val = sum_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "avg":
+                    val = avg_agg(this_query.from_tables[table_name][0], this_query.from_tables[table_name][1][s[1]])
+                elif agg_type == "count":
+                    val = count_agg(this_query.from_tables[table_name][0])
 
-                # search for table name of attr
-                attr_list = attr_name.split(".")  # split to find if alias used
-                if len(attr_list) > 1:
-                    # table specified
-                    attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
-                elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table.")
+                # store value for later application to the table
+                this_query.select_attr[se] = (s[0], s[1], s[2], val)
+
+
+            # remove any raw attributes that are no longer needed
+            remove_list = set()
+            for s in this_query.select_attr:
+                # determine if attribute uses an aggregate operator
+                if len(s) <= 2:
+                    continue
+
+                # check if raw attribute is no longer needed, overwrite with aggregate value.  Else, append new agg. value to all tuples
+                keep_raw = False
+                for r in this_query.select_attr:        # looking for matches (need to keep raw if a match exists)
+                    if s != r and r not in remove_list:
+                        if len(r) == 2:      # only consider at attribute without agg. operators
+                            if r == (s[0], s[1]):
+                                keep_raw = True
+                                break
+                        elif r[:2] == (s[0], s[1]) and r[:2] in remove_list:
+                            # raw attribute shared by these agg. operations was overwritten by the first one, so append the second to all tuples
+                            keep_raw = True
+                            break
+
+                # resolve name aliasing
+                table = s[0]
+                while type(this_query.from_tables[table]) is str:
+                    table = this_query.from_tables[table]
+
+                # apply agg. operators appropriately
+                if keep_raw:
+                    # append agg. value to each tuple in the relation
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup.append(s[3])
+                        this_query.from_tables[table][0][r] = tup
+
+                    # update the dictionary to reflect this change (take max index and add 1)
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = max(list(this_query.from_tables[table][1].values())) + 1
+
                 else:
-                    # only one table in from, dont need to specify table
-                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
-                    attr_tup = (this_query.from_tables[table_key], attr_name)
+                    # overwrite raw attribute
+                    attr = this_query.from_tables[table][1][s[1]]
+                    for r in range(len(this_query.from_tables[table][0])):
+                        tup = this_query.from_tables[table][0][r]
+                        tup[attr] = s[3]
+                        this_query.from_tables[table][0][r] = tup
 
-                # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
-                if attr_tup[0] in TABLES:
-                    if attr_tup[1] not in TABLES[attr_tup[0]].attribute_names:
-                        error(" valid table name.  Invalid attribute in SELECT clause")
-                else:
-                    error(" invalid table used in SELECT clause")
+                    # update dictionary (remove the raw value and replace with the aggregate one)
+                    this_query.from_tables[table][1].pop(s[1])
+                    this_query.from_tables[table][1][s[2] + "(" + s[1] + ")"] = attr
 
-                # validate aggregate operator
-                if len(close_paren_list) != 2:
-                    error(" invalid aggregate operator syntax")
-                else:
-                    # identify any aggregate operators on select attributes
-                    add_on = ""
-                    if " min(" in select_list[attr]:
-                        this_query.min.append(attr_tup)     # need to store table name and attribute for later calculations
-                        add_on = "min"
-                    elif " max(" in select_list[attr]:
-                        this_query.max.append(attr_tup)
-                        add_on = "max"
-                    elif " avg(" in select_list[attr]:
-                        this_query.avg.append(attr_tup)
-                        add_on = "avg"
-                    elif " count(" in select_list[attr]:    # any aggregate operators we are not going to support
-                        this_query.count.append(attr_tup)
-                        add_on = "count"
-                    elif " sum(" in select_list[attr]:
-                        this_query.sum.append(attr_tup)
-                        add_on = "sum"
-                    else:
-                        error(" invalid aggregate operator included in SELECT.")
-
-                    # add additioanl field for the type of aggregate operator (makes optimizer code much faster)
-                    attr_tup = (attr_tup[0], attr_tup[1], add_on)
-                this_query.select_attr.append(attr_tup)     # store attribute
-            else:
-                attr_name = select_list[attr].lstrip().rstrip()  # no aggregate operator, so just strip whitespace
-
-                # search for table name of attr
-                attr_list = attr_name.split(".")  # split to find if alias used
-                if len(attr_list) > 1:
-                    # table specified
-                    attr_tup = (this_query.from_tables[attr_list[0]], attr_list[1])
-                elif this_query.num_tables > 1:  # no table specified ( >1 table in query )
-                    error(" ambiguous attribute name.  When >1 table used in query, need to specify table. (if using '*', need to specify table)")
-                else:
-                    # only one table in from, dont need to specify table
-                    table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
-                    attr_tup = (this_query.from_tables[table_key], attr_name)
-
-                # validate that attr_tup[1] is in attr_tup[0]  (that desired attr is in table)
-                if attr_tup[0] in TABLES:
-                    if attr_tup[1] in TABLES[attr_tup[0]].attribute_names:
-                        this_query.select_attr.append(attr_tup)
-                    elif attr_tup[1] == "*":
-                        # * specified.  Add all attributes from the specified table (handled by optimizer)
-                        this_query.select_attr.append((attr_tup[0], '*'))
-                    else:
-                        error(" valid table name.  Invalid attribute in SELECT clause")
-                else:
-                    error(" invalid table used in SELECT clause")
+                    # add raw to remove_list (avoid trying to remove it twice.  Use s[0] because table may be a join name)
+                    remove_list.add((s[0], s[1]))
 
 
-            # remove any duplicate tuples
-            this_query.select_attr = list(set(this_query.select_attr))
+    #                               #
+    #   Create relation to output   #
+    #                               #
+    # for each table listed in the select clause, add to output relation (all have necessary projections applied)
+    relation = []
+    tables_to_include = [proj[0] for proj in this_query.select_attr]
+    for tab in range(len(tables_to_include)):
+        # resolve name aliasing
+        table = tables_to_include[tab]
+        if table in this_query.alias:
+            table = tables_to_include[tab] = this_query.from_tables[table]
+        while type(this_query.from_tables[table]) == str:
+            table = tables_to_include[tab] = this_query.from_tables[table]
+    tables_to_output = list(set(tables_to_include))     # remove duplicates
 
-        ### parse WHERE ###
-        if where_clause != "":
-            this_query.where = parse_where(this_query, where_clause)
-        else:
-            this_query.where = None
+    # loop through tables to output.  Get contents of relations and attribute names
+    attr_out_list = []
+    for ta in range(len(tables_to_output)):
+        local_attr_list = sorted(this_query.from_tables[tables_to_output[ta]][1], key=this_query.from_tables[tables_to_output[ta]][1].get)
+        attr_out_list.extend(local_attr_list)
+        table = this_query.from_tables[tables_to_output[ta]][0]
+        for t in range(len(table)):
+            if ta == 0:
+                relation.append([])
+            tup = table[t]          # get information from corresponding tuple of "ta" relation
+            relation[t].extend(tup) # append information to tuple already in output relation
 
+    # if now function was specified in query, append it to output relation tuples
+    if this_query.now:
+        t = time.localtime()
+        current_time = time.strftime("%H:%M:%S", t)
+        attr_out_list.append("NOW")
+        for r in range(len(relation)):
+            relation[r].append(current_time)
 
-    # return a Query object
-    return this_query
-# END parse_query
+    return attr_out_list, relation, explain_string
+# END optimizer
 
 
 
@@ -960,368 +567,316 @@ def parse_query(this_query, inp_line):
 
 
 
-# parse_where
-def parse_where(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
-    # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
-    this_comparison = Comparison()
-    if " and " in where_clause or " or " in where_clause:
-        close_list = where_clause.split(")")
-        close_list = [c for c in close_list if c != ""]
-        remove_list = []
-        counter = 0
-        for c in range(len(close_list)):
-            num_open = close_list[c].count("(")
-            if num_open > 1:
-                counter += 1
-
-                # compound condition.  Combine and recursive call
-                num_open -= 1
-                for i in range(num_open):
-                    remove_list.append(c + i + 1)
-        if counter > 0:
-            count = 0
-            for r in remove_list:
-                close_list.pop(r - count)
-                count += 1
-
-            # fix regular expression to avoid errors
-            helper_list = close_list[1].split("(")
-            if len(helper_list) > 1:
-                for i in range(1, len(helper_list)):
-                    if i != 0:
-                        helper_list[i] = "\(" + helper_list[i]
-                fixed_string = ''
-                for i in helper_list:
-                    fixed_string += i
-                close_list[1] = fixed_string
 
 
 
-            # have narrowed close_list down to only top level operators.  take one at a time (lower levels of recursion will handle the rest)
-            useful_list = re.split(close_list[1], where_clause)
-            useful_list[1] = close_list[1] + useful_list[1]
-            useful_list[1] = useful_list[1].replace("\\", "")
 
-            # determine operation to perform
-            open_list = useful_list[1].split("(", maxsplit=1)
-            useful_list[1] = "(" + open_list[1]
+# where_evaluate
+def where_evaluate(this_query, cond, ret=False):
+    # results are applied to this_query when ret=False.  Recursive calls set ret=True to avoid cross-contamination of recursive calls
+    # classify condition
+    if type(cond.left_operand) is tuple:
+        if type(cond.right_operand) is tuple:  # comparing 2 attributes --> an equi-join
+            # left operand set up
+            left_table_name = cond.left_operand[0]
+            left_attr = cond.left_operand[1]
+            if left_table_name in this_query.alias:  # resolve name aliasing
+                left_table_name = this_query.from_tables[left_table_name]
+            if type(this_query.from_tables[left_table_name]) is str:
+                left_table_name = this_query.from_tables[left_table_name]
+            left_attr_index = this_query.from_tables[left_table_name][1][left_attr]     # get index of joining attribute
 
+            # right operand set up
+            right_table_name = cond.right_operand[0]
+            right_attr = cond.right_operand[1]
+            if right_table_name in this_query.alias:
+                right_table_name = this_query.from_tables[right_table_name]
+            if type(this_query.from_tables[right_table_name]) is str:
+                right_table_name = this_query.from_tables[right_table_name]
+            right_attr_index = this_query.from_tables[right_table_name][1][right_attr]  # get index of joining attribute
 
-            if " or " in open_list[0]:
-                # clean outer parenthesis
-                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
-                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
-                zero_ind = useful_list[0].rfind(")")
-                useful_list[0] = useful_list[0][:zero_ind]
-                one_ind = useful_list[1].rfind(")")
-                useful_list[1] = useful_list[1][:one_ind]
+            # updating the dictionary of indices for the result of this join
+            join_attr_dict = this_query.from_tables[left_table_name][1]
+            attr_offset = len(this_query.from_tables[left_table_name][1]) + 1  # + 1 since indexing starts at 0
+            for k in this_query.from_tables[right_table_name][1]:
+                attr_ind = this_query.from_tables[right_table_name][1][k] + attr_offset
+                if this_query.from_tables[right_table_name][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
+                    attr_ind -= 1
+                join_attr_dict[k] = attr_ind
 
-                # recursive calls
-                this_comparison.left_operand = parse_where(this_query, useful_list[0])
-                this_comparison.right_operand = parse_where(this_query, useful_list[1])
-                this_comparison.or_ = True
-            elif " and " in open_list[0]:
-                # clean outer parenthesis
-                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
-                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
-                zero_ind = useful_list[0].rfind(")")
-                useful_list[0] = useful_list[0][:zero_ind]
-                one_ind = useful_list[1].rfind(")")
-                useful_list[1] = useful_list[1][:one_ind]
+            # selection function calls join with an equi-join specified
+            joined_relation = selection(this_query.from_tables[left_table_name][0], this_query.from_tables[right_table_name][0], cond, left_attr_index, right_attr_index)
 
-                # recursive calls
-                this_comparison.left_operand = parse_where(this_query, useful_list[0])
-                this_comparison.right_operand = parse_where(this_query, useful_list[1])
-                this_comparison.and_ = True
-            else:
-                error("invalid syntax in where clause")
-        else:
-            if " and " in where_clause:
-                and_list = re.split(" and ", where_clause, maxsplit=1)
-                this_comparison.left_operand = parse_where(this_query, and_list[0])
-                this_comparison.right_operand = parse_where(this_query, and_list[1])
-                this_comparison.and_ = True
+            # make tables used in join reference its result
+            join_name = "JOIN_" + left_table_name + "_" + right_table_name
+            this_query.from_tables[left_table_name] = join_name
+            this_query.from_tables[right_table_name] = join_name
+            this_query.from_tables[join_name] = (joined_relation, join_attr_dict)
 
-            elif " or " in where_clause:
-                or_list = re.split(" or ", where_clause, maxsplit=1)
-                this_comparison.left_operand = parse_where(this_query, or_list[0])
-                this_comparison.right_operand = parse_where(this_query, or_list[1])
-                this_comparison.or_ = True
-    else:   # base case
-        # break into operands
-        this_comparison.leaf = True
-        if " =" in where_clause:
-            op = "="
-            this_comparison.equal = True
-
-        elif "!=" in where_clause:
-            op = "!="
-            this_comparison.not_equal = True
-
-        elif ">=" in where_clause:
-            op = ">="
-            this_comparison.great_equal = True
-
-        elif "<=" in where_clause:
-            op = "<="
-            this_comparison.less_equal = True
-
-        elif "<" in where_clause:
-            op = "<"
-            this_comparison.less = True
-
-        elif ">" in where_clause:
-            op = ">"
-            this_comparison.greater = True
+            if ret:
+                return joined_relation, join_attr_dict, [left_table_name, right_table_name]
 
         else:
-            error(" no recognized operation used in the WHERE clause")
-            pass
+            # only left operand is a table/attribute pair
+            table = cond.left_operand[0]
+            attr = cond.left_operand[1]
 
-        operand_list = re.split(op, where_clause)   # split clause on whichever operation is found first
-        for o in range(len(operand_list)):      # clean operands before processing
-            operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
+            # resolve name aliasing
+            if table in this_query.alias:
+                table = this_query.from_tables[table]
+            if type(this_query.from_tables[table]) is str:
+                table = this_query.from_tables[table]
 
-
-        for operand in range(len(operand_list)):
-            # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
-
-            if operand_list[operand].isdigit():     # if this operand is a number
-                if '.' in operand_list[operand]:
-                    helper = float(operand_list[operand])
-                else:
-                    helper = int(operand_list[operand])
-            else:   # operand is a name of something (not a number)
-                attr_list = operand_list[operand].split(".")  # split to find if alias used
-                if len(attr_list) > 1:  # if a table name is specified
-
-                    # validate attr_list here
-                    attr_list[0] = this_query.from_tables[attr_list[0]]     # converts alias if needed
-                    if attr_list[0] in TABLES:
-                        if attr_list[1] in TABLES[attr_list[0]].attribute_names:
-                            helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
-                        else:
-                            error(" valid table name, invalid attribute in WHERE clause")
-                    else:
-                        error(" invalid table name in WHERE clause")
-
-                else:
-                    quote_list = operand_list[operand].split("\"")
-                    if len(quote_list) > 1:     # no table specified --> may be a string for a comparison
-                        if len(quote_list) == 3:
-                            helper = quote_list[1].lstrip().rstrip()
-                        else:
-                            error(" syntax error with \"...\" in WHERE clause.")
-
-                    elif this_query.num_tables ==  1:  # no table specified ( >1 table in query )
-                        # only one table is used in the query, so no table specification needed
-                        # only on table in from, dont need to specify table
-                        table_key = list(this_query.from_tables.keys())[0]  # only one table --> possibly 2 entries if alias used (either raw name or alias is fine)
-
-                        # validate operand_list[operand] is in this_query.from_tables[table_key] table
-                        if operand_list[operand] in TABLES[this_query.from_tables[table_key]].attribute_names:
-                             helper = (this_query.from_tables[table_key], operand_list[operand])
-                        else:
-                            error(" valid table name, invalid attribute in WHERE clause")
-                    else:
-                        error(" ambiguous which table attribute is from in the WHERE clause. >1 table in querey, must specify where the attribute comes from")
-
-            # complete the Comparison object
-            if operand == 0:
-                this_comparison.left_operand = helper
+            # determine index of desired attribute, get attribute dictionary, call selection function
+            attr_index = this_query.from_tables[table][1][attr]
+            dic = this_query.from_tables[table][1]
+            if ret:
+                return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
             else:
-                this_comparison.right_operand = helper
+                this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
 
+    elif type(cond.right_operand) is tuple:
+        # only right operand is a table/attribute pair
+        table = cond.right_operand[0]
+        attr = cond.right_operand[1]
 
+        # resolve name aliasing
+        if table in this_query.alias:
+            table = this_query.from_tables[table]  # get non-alias name in order to get access to stored relation
+        if type(this_query.from_tables[table]) is str:
+            table = this_query.from_tables[table]
 
-        # TODO need to add support for aggregate operators and parenthesis
-    return this_comparison
-# END parse_where
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# parse_where
-def parse_where_dml(this_query, where_clause):      # this_query included for table name validation.  where_clause is string to parse
-    # parse by AND/OR recursively --> once done with this, should have atomic comparisons to perform (at leaf level of comparison tree)
-    this_comparison = Comparison()
-    if " and " in where_clause or " or " in where_clause:
-        close_list = where_clause.split(")")
-        close_list = [c for c in close_list if c != ""]
-        remove_list = []
-        counter = 0
-        for c in range(len(close_list)):
-            num_open = close_list[c].count("(")
-            if num_open > 1:
-                counter += 1
-
-                # compound condition.  Combine and recursive call
-                num_open -= 1
-                for i in range(num_open):
-                    remove_list.append(c + i + 1)
-        if counter > 0:
-            count = 0
-            for r in remove_list:
-                close_list.pop(r - count)
-                count += 1
-
-            # fix regular expression to avoid errors
-            helper_list = close_list[1].split("(")
-            if len(helper_list) > 1:
-                for i in range(1, len(helper_list)):
-                    if i != 0:
-                        helper_list[i] = "\(" + helper_list[i]
-                fixed_string = ''
-                for i in helper_list:
-                    fixed_string += i
-                close_list[1] = fixed_string
-
-
-
-            # have narrowed close_list down to only top level operators.  take one at a time (lower levels of recursion will handle the rest)
-            useful_list = re.split(close_list[1], where_clause)
-            useful_list[1] = close_list[1] + useful_list[1]
-            useful_list[1] = useful_list[1].replace("\\", "")
-
-            # determine operation to perform
-            open_list = useful_list[1].split("(", maxsplit=1)
-            useful_list[1] = "(" + open_list[1]
-
-
-            if " or " in open_list[0]:
-                # clean outer parenthesis
-                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
-                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
-                zero_ind = useful_list[0].rfind(")")
-                useful_list[0] = useful_list[0][:zero_ind]
-                one_ind = useful_list[1].rfind(")")
-                useful_list[1] = useful_list[1][:one_ind]
-
-                # recursive calls
-                this_comparison.left_operand = parse_where(this_query, useful_list[0])
-                this_comparison.right_operand = parse_where(this_query, useful_list[1])
-                this_comparison.or_ = True
-            elif " and " in open_list[0]:
-                # clean outer parenthesis
-                useful_list[0] = useful_list[0].split("(", maxsplit=1)[1]
-                useful_list[1] = useful_list[1].split("(", maxsplit=1)[1]
-                zero_ind = useful_list[0].rfind(")")
-                useful_list[0] = useful_list[0][:zero_ind]
-                one_ind = useful_list[1].rfind(")")
-                useful_list[1] = useful_list[1][:one_ind]
-
-                # recursive calls
-                this_comparison.left_operand = parse_where(this_query, useful_list[0])
-                this_comparison.right_operand = parse_where(this_query, useful_list[1])
-                this_comparison.and_ = True
-            else:
-                error("invalid syntax in where clause")
+        # determine index of desired attribute
+        attr_index = this_query.from_tables[table][1][attr]
+        dic = this_query.from_tables[table][1]
+        if ret:
+            return selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic, [table]
         else:
-            if " and " in where_clause:
-                and_list = re.split(" and ", where_clause, maxsplit=1)
-                this_comparison.left_operand = parse_where(this_query, and_list[0])
-                this_comparison.right_operand = parse_where(this_query, and_list[1])
-                this_comparison.and_ = True
+            this_query.from_tables[table] = (selection(this_query.from_tables[table][0], None, cond, attr_index, None), dic)
 
-            elif " or " in where_clause:
-                or_list = re.split(" or ", where_clause, maxsplit=1)
-                this_comparison.left_operand = parse_where(this_query, or_list[0])
-                this_comparison.right_operand = parse_where(this_query, or_list[1])
-                this_comparison.or_ = True
-    else:   # base case
-        # break into operands
-        this_comparison.leaf = True
-        if " =" in where_clause:
-            op = "="
-            this_comparison.equal = True
-
-        elif "!=" in where_clause:
-            op = "!="
-            this_comparison.not_equal = True
-
-        elif ">=" in where_clause:
-            op = ">="
-            this_comparison.great_equal = True
-
-        elif "<=" in where_clause:
-            op = "<="
-            this_comparison.less_equal = True
-
-        elif "<" in where_clause:
-            op = "<"
-            this_comparison.less = True
-
-        elif ">" in where_clause:
-            op = ">"
-            this_comparison.greater = True
-
-        else:
-            error(" no recognized operation used in the WHERE clause")
-            pass
-
-        operand_list = re.split(op, where_clause)   # split clause on whichever operation is found first
-        for o in range(len(operand_list)):      # clean operands before processing
-            operand_list[o] = operand_list[o].rstrip().lstrip().strip('(').strip(')')
-
-
-        for operand in range(len(operand_list)):
-            # once at leaf level of comparisons, tokenize on "." to find table names (careful not to misclassify floats)
-            if operand_list[operand].isdigit():     # if this operand is a number
-                if '.' in operand_list[operand]:
-                    helper = float(operand_list[operand])
-                else:
-                    helper = int(operand_list[operand])
-            else:   # operand is a name of something (not a number)
-                attr_list = operand_list[operand].split(".")  # split to find if alias used
-                if operand_list[operand].lstrip().rstrip().isdigit():
-                    if len(attr_list) > 1:
-                        helper = float(operand_list[operand])
-                    else:
-                        helper = int(operand_list[operand])
-                elif len(attr_list) > 1:  # if a table name is specified
-
-                    # validate attr_list here
-                    if attr_list[0] in TABLES:
-                        if attr_list[1] in TABLES[attr_list[0]].attribute_names:
-                            helper = (attr_list[0].rstrip().lstrip(), attr_list[1].rstrip().lstrip())
-                        else:
-                            error(" valid table name, invalid attribute in WHERE clause")
-                    else:
-                        error(" invalid table name in WHERE clause")
-
-                else:
-                    quote_list = operand_list[operand].split("\"")
-                    if len(quote_list) > 1:
-                        if len(quote_list) == 3:
-                            helper = quote_list[1].lstrip().rstrip()
-                        else:
-                            error(" syntax error with \"...\" in WHERE clause.")
-                    else:
-                        error(" unrecognized input in WHERE clause. (did you specify tables for all attributes used in WHERE clause?)")
-
-
-
-            # complete the Comparison object
-            if operand == 0:
-                this_comparison.left_operand = helper
+    elif cond.and_ or cond.or_:
+        # compound query. Break into operands, evaluate, and combine appropriately
+        result_relation = []
+        attr_dict = {}
+        if cond.and_:
+            left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
+            right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
+            if left_dict == right_dict:
+                result_relation = intersection(left, right)
+                attr_dict = left_dict
             else:
-                this_comparison.right_operand = helper
+                # operands do not both operate on the same table.  Store those that meet the respective conditions
+                if ret:     # ret means at an internal node in tree of conditions.  This solution may produce incorrect solutions
+                    error("dictionaries do not match.  Cannot perform AND operation in WHERE clause.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                    # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+                    return [], {}, []      # allowing function to terminate normally will overwrite the changes made here
+
+        else:   # cond._or
+            left, left_dict, affected_left = where_evaluate(this_query, cond.left_operand, ret=True)
+            right, right_dict, affected_right = where_evaluate(this_query, cond.right_operand, ret=True)
+            if left_dict == right_dict:
+                result_relation = union(left, right)
+                attr_dict = left_dict
+            else:
+                # operands do not both operate on the same table.  Store those that meet the respective conditions
+                if ret:  # ret means at an internal node in tree of conditions.  This solution may produce incorrect solutions
+                    error("dictionaries do not match.  Cannot perform union operation.")
+                else:
+                    # apply to left
+                    for tab in affected_left:
+                        this_query.from_tables[tab] = (left, left_dict)
+
+                    # apply to right
+                    for tab in affected_right:
+                        this_query.from_tables[tab] = (right, right_dict)
+
+                    return [], {}, []     # allowing function to terminate normally will overwrite the changes made here
+
+
+        # apply results to affected tables.  Combine lists and remove duplicates
+        total_affected = list(set(affected_left + affected_right))
+        if ret:
+            return result_relation, left_dict, total_affected
+        else:
+            for table in total_affected:
+                # resolve name aliasing
+                if this_query.from_tables[table] is str:
+                    table = this_query.from_tables[table]
+                this_query.from_tables[table] = (result_relation, attr_dict)
+    else:
+        error(" no valid comparison does not use at least one table attribute.")
+# END where_evaluate
 
 
 
-        # TODO need to add support for aggregate operators and parenthesis
-    return this_comparison
-# END parse_where_dml
+
+
+
+
+
+
+
+# where_access      determine selections that can be performed using an index
+def where_access(this_comparison, this_query, explain_string):
+    if this_comparison is None:
+        return False
+
+    if this_comparison.and_:
+        left_prune = False
+        right_prune = False
+
+        # handle left subtree
+        if this_comparison.left_operand.leaf and this_comparison.left_operand.equal:
+            remove_and = False
+            keep_left = True
+            keep_right = True
+            cond = this_comparison.left_operand
+            left = type(cond.left_operand) is tuple
+            right = type(cond.right_operand) is tuple
+
+            # if one of the operands is a table/attribute pair and the other is not
+            if left and not right:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.left_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+                    try:
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name),
+                                                                        TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_left = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+            elif right and not left:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.right_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+                    try:
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand,
+                                     TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc)
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_right = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc)
+
+            # determine how to prune this branch
+            if remove_and:
+                if not keep_right:
+                    if not keep_left:
+                        return False    # tell parent to remove this branch entirely, both selections involved have already been performed
+                    else:
+                        # copy contents of left_operand into this_comparison
+                        this_comparison.copy(this_comparison.left_operand)
+                elif not keep_left:
+                    # copy contents of right_operand into this_comparison
+                    this_comparison.copy(this_comparison.right_operand)
+        else:
+            if not where_access(this_comparison.left_operand, this_query, explain_string):
+                left_prune = True
+
+
+        # handle right subtree
+        if this_comparison.right_operand.leaf and this_comparison.right_operand.equal:
+            remove_and = False
+            keep_left = True
+            keep_right = True
+            cond = this_comparison.right_operand
+            left = type(cond.left_operand) is tuple
+            right = type(cond.right_operand) is tuple
+
+            # if one of the operands is a tuple and the other is not
+            if left and not right:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.left_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.left_operand[1]:
+                    try:
+                        this_query.from_tables[cond.left_operand[0]] = (access_index(TABLES[table_name], cond.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_left = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+            elif right and not left:
+                # check for an index on this attribute
+                table_name = this_query.from_tables[cond.right_operand[0]]
+                if TABLES[table_name].storage.index_attr == cond.right_operand[1]:
+                    try:
+                        this_query.from_tables[cond.right_operand[0]] = (access_index(TABLES[table_name], cond.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                        explain_string += "\n" + table_name + " loaded using an index."
+                        remove_and = True
+                        keep_right = False
+                    except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                        this_query.from_tables[cond.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+
+            # determine how to prune this branch
+            if remove_and:
+                if not keep_right:
+                    if not keep_left:
+                        return False  # tell parent to remove this branch entirely
+                    else:
+                        # copy contents of left_operand into this_comparison
+                        this_comparison.copy(this_comparison.left_operand)
+                elif not keep_left:
+                    # copy contents of right_operand into this_comparison
+                    this_comparison.copy(this_comparison.right_operand)
+        else:
+            if not where_access(this_comparison.right_operand, this_query, explain_string):
+                right_prune = True
+
+
+        # handle parent-level pruning
+        if right_prune:
+            if left_prune:
+                return False    # both left and right branches should be pruned. Tell parent that this entire branch is no longer needed
+            else:
+                # right branch no longer needed. Substitute in the left branch
+                this_comparison.copy(this_comparison.left_operand)
+                return True
+        elif left_prune:
+            # left branch no longer needed. Substitute in the right branch
+            this_comparison.copy(this_comparison.right_operand)
+            return True
+        else:
+            return True     # no parent-level pruning needed
+
+    elif this_comparison.equal and this_comparison.leaf:    # this only happens if is initially only one condition exists in the where clause
+        evaluated = False
+        left = type(this_comparison.left_operand) is tuple
+        right = type(this_comparison.right_operand) is tuple
+
+        # if one of the operands is a table/attribute pair and the other is not
+        if left and not right:
+            # check for an index on this attribute
+            table_name = this_query.from_tables[this_comparison.left_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.left_operand[1]:
+                try:
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access_index(TABLES[table_name], this_comparison.right_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
+                except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                    this_query.from_tables[this_comparison.left_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+        elif right and not left:
+            # check for an index on this attribute
+            table_name = this_query.from_tables[this_comparison.right_operand[0]]
+            if TABLES[table_name].storage.index_attr == this_comparison.right_operand[1]:
+                try:
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access_index(TABLES[table_name], this_comparison.left_operand, TABLES[table_name].storage.index_name), TABLES[table_name].storage.attr_loc.copy())
+                    evaluated = True
+                except ValueError:  # if index access unsuccessful (invalid key?), then resort to normal access path
+                    this_query.from_tables[this_comparison.right_operand[0]] = (access(TABLES[table_name]), TABLES[table_name].storage.attr_loc.copy())
+        # determine how to prune this branch
+        if evaluated:       # if condition has been evaluated, remove it
+            return False
+        else:
+            return True
+
+    else:
+        return True     # who knows whats in this condition, leave in tree for later evaluation
+# END where_list
