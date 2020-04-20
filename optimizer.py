@@ -596,13 +596,12 @@ def where_evaluate(this_query, cond, ret=False):
             right_attr_index = this_query.from_tables[right_table_name][1][right_attr]  # get index of joining attribute
 
             # updating the dictionary of indices for the result of this join
-            join_attr_dict = this_query.from_tables[left_table_name][1]
-            attr_offset = len(this_query.from_tables[left_table_name][1]) + 1  # + 1 since indexing starts at 0
+            join_attr_dict = this_query.from_tables[left_table_name][1].copy()
+            attr_offset = len(this_query.from_tables[left_table_name][1])
             for k in this_query.from_tables[right_table_name][1]:
-                attr_ind = this_query.from_tables[right_table_name][1][k] + attr_offset
-                if this_query.from_tables[right_table_name][1][k] > right_attr_index:  # account for the removal of this duplicate attribute
-                    attr_ind -= 1
-                join_attr_dict[k] = attr_ind
+                if k not in join_attr_dict:
+                    join_attr_dict[k] = attr_offset
+                    attr_offset += 1
 
             # selection function calls join with an equi-join specified
             joined_relation = selection(this_query.from_tables[left_table_name][0], this_query.from_tables[right_table_name][0], cond, left_attr_index, right_attr_index)
