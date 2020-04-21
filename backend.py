@@ -579,8 +579,6 @@ def drop_table(table_obj):
     if table_obj.storage.index_name != "":
         delete_index(table_obj, table_obj.storage.index_name)
 
-    # TODO referential integrity concerns here too...
-
     delete_relation_storage(table_obj)
     TABLES.pop(table_obj.name)
 # END drop_table
@@ -1193,8 +1191,14 @@ def dml_update(dml_obj):
         error("cannot update non-existent tuples")
 
     # perform specified changes
-    for u in range(len(update_list)):
-        update_list[u] = function_to_apply(update_list[u], dml_obj)
+    if type(dml_obj.set[0].right_operand) == str:
+        for u in range(len(update_list)):
+            update_list[u] = function_to_apply(update_list[u], dml_obj)
+    else:
+        attr_ind_tochange = TABLES[dml_obj.table_name].storage.attr_loc[dml_obj.set[0].left_operand]
+        for u in range(len(update_list)):
+            update_list[u][attr_ind_tochange] = dml_obj.set[0].right_operand
+
 
     # perform correct update (check for an index)
     if TABLES[dml_obj.table_name].storage.index_name != "":      # index found
@@ -1216,6 +1220,11 @@ def function_to_apply(tup, dml_obj):
     orig_attr_type = TABLES[dml_obj.table_name].attributes[update_attr].type
 
     # determine what operation to perform
+    # if orig_attr_type == 'int' or orig_attr_type == "float":
+    #     pass
+    # else:
+
+
     if "+" in dml_obj.set[0].right_operand:
         operands = dml_obj.set[0].right_operand.split("+")
 
